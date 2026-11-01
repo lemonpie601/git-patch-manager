@@ -493,7 +493,7 @@ async function watch() {
       linkState("missing", "\"" + MANAGER_NAME + "\" 확장을 찾지 못했습니다. 외부 확장에서 켜져(승인되어) 있는지 확인해 주세요. 찾으면 바로 연결합니다.");
       continue;
     }
-    linkState("ok", "패치 관리자와 연결했습니다. 이제 [자동 적용] · [서버에서 검사]를 쓸 수 있습니다.");
+    linkState("ok", "패치 관리자와 연결했습니다. 이제 [검사] → [설치된 패치 찾기 (도우미)]와 [자동 적용]을 쓸 수 있습니다.");
     try {
       if (unsent) {
         await report(unsent);
