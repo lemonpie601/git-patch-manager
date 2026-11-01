@@ -6,7 +6,7 @@
 // 사용자가 node로 실행합니다. 마리나라를 다시 켜면 설치 기록(/api/capability-packages/installed)의 파일 해시를
 // 실행 전과 비교해 적용 여부를 알아내고, 대상 패키지가 업데이트되면 "다시 실행 필요"로 표시합니다.
 
-const PM_VERSION = "1.4.0";
+const PM_VERSION = "1.4.1";
 const GH_LIMIT = 8 * 1024 * 1024;
 const SCRIPT_LIMIT = 2 * 1024 * 1024;
 let stopped = false;
@@ -1321,11 +1321,23 @@ async function readStorage() {
 
 // Written only when something happens: Marinara's storage patch is read-then-write, so frequent
 // writes from here could race the manager's own saves.
+let attached = false;
 let status = { version: VERSION, engine, startedAt: new Date().toISOString() };
 async function report(fields) {
-  status = { ...status, ...fields, at: new Date().toISOString() };
-  if (managerId) await api("/personal-extensions/" + encodeURIComponent(managerId) + "/storage", "PATCH", { helper: status });
+  status = { ...status, ...fields, supervisor: !attached, at: new Date().toISOString() };
+  if (!managerId) return;
+  const path = "/personal-extensions/" + encodeURIComponent(managerId) + "/storage";
+  // The storage patch is read-then-write on the server, so a save from the page at the same moment can
+  // undo this one. Read it back and write again until it holds.
+  for (let i = 0; i < 4; i++) {
+    await api(path, "PATCH", { helper: status });
+    await sleep(500 + i * 500);
+    const back = await api(path).catch(() => null);
+    if (back && back.value && back.value.helper && back.value.helper.at === status.at) return;
+  }
+  throw new Error("패치 관리자에 답을 저장하지 못했습니다.");
 }
+const ATTACHED_ONLY = "이 마리나라는 도우미가 켠 것이 아니라서(런처·서비스 등으로 켬) 도우미가 재시작하며 패치할 수 없습니다. 설치된 패치 찾기와 백업본 정리는 됩니다. 자동 적용을 쓰려면 마리나라를 끄고 'node marinara-patch-helper.mjs'로 켜 주세요. 런타임 패치만 바꾸는 거라면 화면의 NODE_OPTIONS 줄을 .env에 넣고 평소처럼 다시 켜도 됩니다.";
 
 const safeFile = (name) => String(name || "patch.mjs").replace(/[^\w.-]+/g, "-").replace(/^[-.]+/, "") || "patch.mjs";
 
@@ -1682,7 +1694,7 @@ async function watch() {
   for (;;) {
     await sleep(3000);
     if (stopping) return;
-    if (!child || pending) continue;
+    if ((!child && !attached) || pending) continue;
     let value;
     try {
       value = await readStorage();
@@ -1740,6 +1752,7 @@ async function watch() {
           if (rel.split("/").some((x) => !x || x === "." || x === "..") || !relEngine(abs) || !/\.(c?js|mjs)$/i.test(rel) || !existsSync(abs)) problem = "켤 수 없는 파일입니다: " + rel;
         }
       }
+      if (!problem && attached) problem = ATTACHED_ONLY;
       if (problem) {
         say("작업을 거절했습니다: " + problem);
         await report({ seenJob: job.id, doneJob: job.id, error: problem }).catch(() => {});
@@ -1757,7 +1770,7 @@ async function watch() {
       }
       continue;
     }
-    const list = verify(job, value);
+    const list = attached ? ATTACHED_ONLY : verify(job, value);
     config.done = [...config.done, job.id].slice(-50);
     saveConfig();
     if (typeof list === "string") {
@@ -1834,14 +1847,19 @@ const portBusy = await new Promise((done) => {
   socket.once("connect", () => finish(true));
   socket.once("error", () => finish(false));
 });
-if (portBusy) {
-  console.error("[패치 도우미] 마리나라가 이미 켜져 있습니다 (포트 " + port + ").");
-  console.error("  런처나 다른 창으로 켠 마리나라를 먼저 끈 뒤, 이 도우미로 다시 켜 주세요. 도우미가 직접 켠 마리나라만 자동 적용할 수 있습니다.");
-  process.exit(1);
-}
 say("마리나라 엔진: " + engine);
 say("data 폴더: " + dataDir);
 say("연결 코드: " + pairingCode + "  ← 패치 관리자 → 실행 → 자동 적용에 한 번 넣어 주세요");
+// Marinara already running (launcher, watchdog, a service): stay beside it instead of starting another.
+// Finding patches and cleaning backups need no restart, so those still work.
+if (portBusy) {
+  attached = true;
+  say("마리나라가 이미 켜져 있어(포트 " + port + ") 옆에 붙어서 돕니다. 이 창은 켜 둔 채로 두세요(끝내려면 Ctrl+C).");
+  say("  지금 되는 것: 설치된 패치 찾기, 백업본 정리.");
+  say("  재시작이 필요한 것(자동 적용, 런타임 패치 켜기·끄기)은 마리나라를 끄고 이 도우미로 켜야 합니다.");
+  await watch();
+  process.exit(0);
+}
 void watch();
 for (;;) {
   if (!(await rebuildIfNeeded())) {
@@ -2810,8 +2828,8 @@ function autoSectionHtml(mode, runnable) {
   return `<div class="pmgr-side-title">자동 적용 (서버 도우미)</div>
         <p class="pmgr-hint">패치는 마리나라가 꺼져 있을 때만 넣을 수 있습니다. 서버 컴퓨터에 작은 도우미를 한 번 깔아 두면, [자동 적용]을 누를 때 도우미가 마리나라를 정상 재시작하면서 꺼진 그 틈에 패치를 넣고 다시 켭니다. 터미널을 다시 열지 않아도 되고, 집 컴퓨터든 SSH 서버든 호스팅 서버든 똑같이 됩니다.</p>
         <div class="pmgr-opt is-static pmgr-helper">
-            <span><strong>${h?.version ? `${icon("circleCheck", 13)} 도우미 확인됨` : `${icon("circle", 13)} 도우미가 아직 연결되지 않았습니다`}</strong>
-            <span>${h?.version ? `${esc(h.engine || "")} · 마지막 신호 ${fmtTime(h.at)} · v${esc(h.version)}` : "도우미로 마리나라를 켜면 몇 초 뒤 여기에 표시됩니다. 표시가 없어도 연결 코드만 맞으면 자동 적용을 시도할 수 있습니다."}</span></span>
+            <span><strong>${h?.version ? `${icon("circleCheck", 13)} 도우미 확인됨${h.supervisor === false ? " · 붙기 모드" : ""}` : `${icon("circle", 13)} 도우미가 아직 연결되지 않았습니다`}</strong>
+            <span>${h?.version ? `${h.supervisor === false ? "마리나라를 런처·서비스 등 다른 방법으로 켜서 도우미가 옆에 붙어 있습니다. 설치된 패치 찾기와 백업본 정리는 되지만, 재시작이 필요한 자동 적용·런타임 켜기/끄기는 마리나라를 도우미로 켜야 합니다. · " : ""}${esc(h.engine || "")} · 마지막 신호 ${fmtTime(h.at)} · v${esc(h.version)}` : "도우미로 마리나라를 켜면 몇 초 뒤 여기에 표시됩니다. 표시가 없어도 연결 코드만 맞으면 자동 적용을 시도할 수 있습니다."}</span></span>
             ${
               code
                 ? `<div class="pmgr-gh-actions"><span class="pmgr-hint">${icon("check", 12)} 연결 코드가 이 브라우저에 저장되어 있습니다.</span><button type="button" class="pmgr-btn is-ghost" data-act="helper-code-clear">코드 바꾸기</button></div>`
