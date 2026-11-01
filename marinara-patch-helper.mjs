@@ -18,6 +18,7 @@ import { join, resolve, dirname, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { connect } from "node:net";
 
 const VERSION = "1.3.0";
 const MANAGER_NAME = "패치 관리자";
@@ -349,6 +350,23 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+// A Marinara started some other way already holds the port and the data folder; a second server would fail,
+// and only a Marinara this helper started can be restarted by it.
+const portBusy = await new Promise((done) => {
+  const socket = connect({ host: "127.0.0.1", port });
+  const finish = (value) => {
+    socket.destroy();
+    done(value);
+  };
+  socket.setTimeout(800, () => finish(false));
+  socket.once("connect", () => finish(true));
+  socket.once("error", () => finish(false));
+});
+if (portBusy) {
+  console.error("[패치 도우미] 마리나라가 이미 켜져 있습니다 (포트 " + port + ").");
+  console.error("  런처나 다른 창으로 켠 마리나라를 먼저 끈 뒤, 이 도우미로 다시 켜 주세요. 도우미가 직접 켠 마리나라만 자동 적용할 수 있습니다.");
+  process.exit(1);
+}
 say("마리나라 엔진: " + engine);
 say("data 폴더: " + dataDir);
 say("연결 코드: " + pairingCode + "  ← 패치 관리자 → 실행 → 자동 적용에 한 번 넣어 주세요");
