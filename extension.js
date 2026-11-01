@@ -6,7 +6,7 @@
 // 사용자가 node로 실행합니다. 마리나라를 다시 켜면 설치 기록(/api/capability-packages/installed)의 파일 해시를
 // 실행 전과 비교해 적용 여부를 알아내고, 대상 패키지가 업데이트되면 "다시 실행 필요"로 표시합니다.
 
-const PM_VERSION = "1.3.2";
+const PM_VERSION = "1.4.0";
 const GH_LIMIT = 8 * 1024 * 1024;
 const SCRIPT_LIMIT = 2 * 1024 * 1024;
 let stopped = false;
@@ -671,6 +671,7 @@ const waitingIds = () => new Set((state.lastRun?.items || []).filter((x) => !x.d
 
 /** { key, reason } for a patch, from its applied record and the installed package as it is now. */
 function statusInfo(p) {
+  if (isRuntime(p)) return runtimeStatus(p);
   const target = targetOf(p);
   const known = !!state.targets;
   if (known && p.target && !target) return { key: "missing", reason: `대상 패키지 "${p.target}"이(가) 설치되어 있지 않습니다.` };
@@ -683,6 +684,39 @@ function statusInfo(p) {
   return { key: "applied", reason: `${fmtTime(a.at)}에 적용${a.version ? ` · 대상 ${a.version}` : ""}${!known && p.target ? " · 설치 패키지 목록을 읽지 못해 지금 상태는 확인하지 못했습니다" : ""}` };
 }
 const statusOf = (p) => statusInfo(p).key;
+const labelOf = (p) => statusInfo(p).label || STATUS[statusOf(p)].label;
+
+// ----- 런타임 패치 (NODE_OPTIONS) -----
+const runtimeItems = () => state.patches.filter(isRuntime);
+const runtimeWanted = () => runtimeItems().filter((p) => p.include && p.rt?.exists !== false).map((p) => p.rt.path);
+const runtimeActual = () => runtimeItems().filter((p) => p.rt?.actual).sort((a, b) => a.rt.order - b.rt.order).map((p) => p.rt.path);
+const runtimeChanged = () => JSON.stringify(runtimeWanted()) !== JSON.stringify(runtimeActual());
+function runtimePending() {
+  const wanted = runtimeWanted();
+  const actual = runtimeActual();
+  const ids = new Set();
+  if (JSON.stringify(wanted) === JSON.stringify(actual)) return ids;
+  for (const p of runtimeItems()) {
+    const on = wanted.includes(p.rt.path);
+    if (on !== !!p.rt.actual || (on && wanted.indexOf(p.rt.path) !== actual.indexOf(p.rt.path))) ids.add(p.id);
+  }
+  return ids;
+}
+const installedVersion = (t) => state.targets?.get(t.id)?.version ?? t.installed;
+function runtimeStatus(p) {
+  const rt = p.rt || {};
+  if (rt.exists === false) return { key: "missing", label: "파일 없음", reason: `${rt.path} 파일이 없어 마리나라가 시작할 때 오류가 날 수 있습니다. 끄는 것이 좋습니다.` };
+  if (runtimePending().has(p.id)) return { key: "waiting", label: "적용 대기", reason: "켜기·끄기나 순서를 바꿨습니다. 재시작해서 적용해야 마리나라에 반영됩니다." };
+  if (!rt.actual) return { key: "off", label: "꺼짐", reason: "NODE_OPTIONS에 없어 마리나라가 불러오지 않습니다." };
+  const bad = (rt.targets || []).filter((t) => !t.wants.includes(installedVersion(t)));
+  if (bad.length)
+    return {
+      key: "stale",
+      label: "버전 다름",
+      reason: bad.map((t) => `${t.name} ${t.wants.join("/")}용인데 지금 ${installedVersion(t)}입니다`).join(", ") + ". 이런 패치는 버전이 맞지 않으면 대개 아무것도 바꾸지 않고 조용히 꺼집니다. 새 버전용 패치가 필요합니다.",
+    };
+  return { key: "applied", label: "켜짐", reason: `마리나라가 시작할 때 ${rt.order + 1}번째로 불러옵니다(파일은 바꾸지 않고 불러올 때 코드만 고침).` };
+}
 
 // ---------- 저장 ----------
 
@@ -749,8 +783,13 @@ function cleanPatch(p) {
     tags: Array.isArray(p.tags) ? p.tags.filter((t) => typeof t === "string").slice(0, 30) : [],
     note: typeof p.note === "string" ? p.note.slice(0, 2000) : "",
     pinned: !!p.pinned,
+    kind: p.kind === "runtime" ? "runtime" : "script",
+    rt: p.kind === "runtime" && isObj(p.rt) && typeof p.rt.path === "string" ? p.rt : null,
   };
 }
+// Runtime patches keep no code here: the file lives on the server, and NODE_OPTIONS says whether it loads.
+const isRuntime = (p) => p.kind === "runtime";
+const hasCode = (p, scripts = state.scripts) => isRuntime(p) || typeof scripts[p.id] === "string";
 
 let storagePromise = null;
 function loadStorage() {
@@ -763,7 +802,7 @@ function loadStorage() {
 async function readStorage() {
   const stored = (await marinara.storage.get()) || {};
   state.scripts = isObj(stored.scripts) ? stored.scripts : {};
-  state.patches = (Array.isArray(stored.patches) ? stored.patches : []).map(cleanPatch).filter((p) => p && typeof state.scripts[p.id] === "string");
+  state.patches = (Array.isArray(stored.patches) ? stored.patches : []).map(cleanPatch).filter((p) => p && hasCode(p));
   state.groups = Array.isArray(stored.groups) ? stored.groups.filter((g) => isObj(g) && g.id && g.name) : [];
   state.prefs = { ...state.prefs, ...(isObj(stored.prefs) ? stored.prefs : {}) };
   state.lastRun = isObj(stored.lastRun) && Array.isArray(stored.lastRun.items) ? stored.lastRun : null;
@@ -1177,7 +1216,7 @@ const HELPER = String.raw`#!/usr/bin/env node
 // 연결 코드를 넣은 브라우저가 보낸 작업만 실행합니다. 코드는 엔진 폴더의 .marinara-patch-helper.json에 있습니다.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, dirname, sep } from "node:path";
+import { join, resolve, dirname, sep, relative, isAbsolute, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1217,14 +1256,20 @@ function readEnv(file) {
 // The server gets the environment start.bat / start.sh give it: .env loaded before Node starts (so settings
 // such as NODE_OPTIONS --require add-ons take effect), then the launchers' own defaults. Only the server gets
 // it; patch scripts run with this helper's plain environment, without those add-ons preloaded.
-const fileEnv = {};
-for (const [key, value] of Object.entries(readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")))) if (value !== "") fileEnv[key] = value;
-const env = { ...process.env, ...fileEnv };
-if (opt("--port")) env.PORT = opt("--port");
-env.NODE_ENV = "production";
-env.PORT = env.PORT || "7860";
-env.HOST = env.HOST || "0.0.0.0";
-env.SIDECAR_RUNTIME_INSTALL_ENABLED = env.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+// Read again at every start: turning a runtime patch on or off rewrites NODE_OPTIONS in .env.
+const envFile = process.env.MARINARA_ENV_FILE || join(engine, ".env");
+function launchEnv() {
+  const fileEnv = {};
+  for (const [key, value] of Object.entries(readEnv(envFile))) if (value !== "") fileEnv[key] = value;
+  const out = { ...process.env, ...fileEnv };
+  if (opt("--port")) out.PORT = opt("--port");
+  out.NODE_ENV = "production";
+  out.PORT = out.PORT || "7860";
+  out.HOST = out.HOST || "0.0.0.0";
+  out.SIDECAR_RUNTIME_INSTALL_ENABLED = out.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+  return out;
+}
+const env = launchEnv();
 const port = Number(env.PORT) || 7860;
 const dataDir = opt("--data") ? resolve(opt("--data")) : env.DATA_DIR ? resolve(serverRoot, env.DATA_DIR) : join(serverRoot, "data");
 const base = "http://127.0.0.1:" + port + "/api";
@@ -1354,22 +1399,212 @@ function scanData() {
   return { at: new Date().toISOString(), packages, backups };
 }
 
-/** Deletes only backup files inside capability-packages/versions, whatever the job lists. */
-function cleanBackups(paths) {
-  let removed = 0;
-  for (const rel of Array.isArray(paths) ? paths : []) {
-    if (typeof rel !== "string" || !rel.startsWith("versions/") || !BACKUP_FILE.test(rel) || rel.split("/").some((x) => !x || x === "." || x === "..")) continue;
-    const file = resolve(capDir, ...rel.split("/"));
-    if (!file.startsWith(capDir + sep)) continue;
+// ----- 설치된 패치 찾기 -----
+// Two kinds of patch live on a Marinara install:
+//   runtime patches: .cjs files loaded with NODE_OPTIONS --require (from .env); they change code in memory
+//                    as it loads and never touch files, so .env is where they are switched on, off and ordered;
+//   file patches:    scripts like patch/apply-patch.mjs that rewrite package files (found by their markers).
+// Marinara's own folders are skipped: patches/ there is pnpm's, custom_components is Home Assistant's.
+const OWN_DIRS = new Set(["node_modules", "packages", "patches", "android", "docs", "e2e", "scripts", "tools", "win", "custom_components"]);
+const PATCH_FILE = /(^|\/)(patch|patches)\/[^/]+\.(mjs|cjs|js)$|(^|\/)[^/]*patch[^/]*\.(mjs|cjs)$/i;
+const KEEP_TAGS = /^(json|js|cjs|mjs|ts|md|txt|zip|example|map|lock|yaml|yml)$/i;
+const toSlash = (p) => p.split(sep).join("/");
+const relEngine = (abs) => {
+  const r = relative(engine, abs);
+  return r && !r.startsWith("..") && !isAbsolute(r) ? toSlash(r) : null;
+};
+
+function nodeOptionsOf(value) {
+  const tokens = String(value || "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  const requires = [];
+  const other = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const m = /^(?:--require|-r)=(.*)$/.exec(t);
+    let v = m ? m[1] : null;
+    if (v === null && (t === "--require" || t === "-r") && i + 1 < tokens.length) v = tokens[++i];
+    if (v === null) other.push(t);
+    else requires.push(v.replace(/^(['"])(.*)\1$/, "$2"));
+  }
+  return { requires, other };
+}
+const requirePath = (v) => resolve(serverRoot, v);
+
+function describe(text, file) {
+  const body = text.replace(/\r\n?/g, "\n").replace(/^#!.*\n/, "").replace(/^\s*(['"])use strict\1;?[ \t]*\n/, "");
+  const block = /^\s*\/\*+([\s\S]*?)\*\//.exec(body);
+  const lines = block
+    ? block[1].split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trimEnd())
+    : (/^(?:[ \t]*\/\/.*\n?)+/.exec(body)?.[0] || "").split("\n").map((l) => l.replace(/^\s*\/\/\s?/, "").trimEnd());
+  const description = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 1500);
+  const name = basename(file).replace(/\.(cjs|mjs|js)$/i, "").replace(/[-_.]runtime$/i, "");
+  return { name, description };
+}
+
+/** Which installed packages (and versions) a patch names: "gacha-forge-1\.8\.13", "Gacha Forge 1.8.13". */
+function targetsOf(text, installed) {
+  const t = text.replace(/\\\./g, ".");
+  const escRe = (s) => s.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+  const out = [];
+  for (const pkg of installed) {
+    const name = (pkg.manifest && pkg.manifest.name) || pkg.id;
+    const re = new RegExp("(?:" + escRe(pkg.id) + "[-@ ]|" + escRe(name).replace(/\s+/g, "\\s+") + "\\s+v?)(\\d+\\.\\d+\\.\\d+)", "gi");
+    const wants = [...new Set(Array.from(t.matchAll(re), (m) => m[1]))];
+    if (wants.length) out.push({ id: pkg.id, name, wants, installed: String(pkg.version) });
+  }
+  return out;
+}
+
+/** Settings a runtime patch reads: paths in .env it uses through process.env, and JSON next to it. */
+function configsOf(text, file, envValues) {
+  const found = new Map();
+  for (const m of text.matchAll(/process\.env\.([A-Z0-9_]+)/g)) {
+    const v = envValues[m[1]];
+    if (v && /\.(json|ya?ml|txt)$/i.test(v)) found.set(resolve(serverRoot, v), m[1]);
+  }
+  for (const m of text.matchAll(/join\(\s*__dirname\s*,\s*['"]([^'"]+\.json)['"]\s*\)/g)) found.set(join(dirname(file), m[1]), "같은 폴더");
+  // A JSON named after the patch itself (gacha-npc-portrait-runtime.cjs → gacha-npc-portrait.json).
+  const stem = basename(file).replace(/\.(cjs|mjs|js)$/i, "").replace(/[-_.]runtime$/i, "").toLowerCase();
+  for (const m of text.matchAll(/['"]([\w.-]+\.json)['"]/g)) {
+    const p = join(dirname(file), m[1]);
+    if (!found.has(p) && m[1].toLowerCase().startsWith(stem) && existsSync(p)) found.set(p, "같은 폴더");
+  }
+  // package.json and friends are how a patch finds Node modules, not settings of its own.
+  return [...found]
+    .filter(([p]) => !/^(package(-lock)?|tsconfig[\w.-]*|pnpm-[\w.-]+)\.json$/i.test(basename(p)))
+    .map(([p, via]) => ({ via, path: relEngine(p) || toSlash(p), exists: existsSync(p) }));
+}
+
+function fileSize(abs) {
+  const st = statSync(abs);
+  if (!st.isDirectory()) return st.size;
+  let total = 0;
+  for (const rel of listFiles(abs, "", [])) {
     try {
-      if (statSync(file).isFile()) {
-        rmSync(file);
-        removed += 1;
-        say("백업본을 지웠습니다: " + rel);
+      total += statSync(join(abs, rel)).size;
+    } catch {}
+  }
+  return total;
+}
+
+/** Old copies that installs left: .env.before-*, name.json.bak / .gf1812 / .before-x beside the real file, .prev/.backup-* folders. */
+function engineBackups(runtimeFiles) {
+  const out = new Map();
+  const add = (abs, group) => {
+    const rel = relEngine(abs);
+    if (!rel || out.has(rel)) return;
+    try {
+      const st = statSync(abs);
+      out.set(rel, { path: "engine/" + rel, size: fileSize(abs), modified: st.mtimeMs, scope: "engine", group, dir: st.isDirectory() });
+    } catch {}
+  };
+  for (const d of readdirSync(engine, { withFileTypes: true })) if (d.isFile() && /^\.env\./.test(d.name) && d.name !== ".env.example") add(join(engine, d.name), ".env 사본");
+  const folders = new Map();
+  for (const f of runtimeFiles) {
+    const dir = dirname(f);
+    if (dir === engine) {
+      for (const d of readdirSync(dir, { withFileTypes: true })) if (d.isFile() && d.name.startsWith(basename(f) + ".")) add(join(dir, d.name), basename(f));
+    } else if (relEngine(dir)) folders.set(dir, relEngine(dir));
+  }
+  for (const [dir, label] of folders) {
+    const names = readdirSync(dir, { withFileTypes: true });
+    const files = new Set(names.filter((d) => d.isFile()).map((d) => d.name));
+    for (const d of names) {
+      if (d.isDirectory() && (d.name === ".prev" || /^\.?backup/i.test(d.name) || /^\.old/i.test(d.name))) add(join(dir, d.name), label);
+      if (!d.isFile()) continue;
+      const cut = d.name.lastIndexOf(".");
+      const base = d.name.slice(0, cut);
+      const tag = d.name.slice(cut + 1);
+      if (BACKUP_FILE.test(d.name) || (cut > 0 && files.has(base) && !KEEP_TAGS.test(tag))) add(join(dir, d.name), label);
+    }
+  }
+  return [...out.values()];
+}
+
+function findScripts(skip) {
+  const out = [];
+  const walk = (dir, rel, depth) => {
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {}
+    for (const d of entries) {
+      const abs = join(dir, d.name);
+      if (d.isDirectory()) {
+        if (depth < 4 && !d.name.startsWith(".") && d.name !== "node_modules" && !(depth === 0 && OWN_DIRS.has(d.name))) walk(abs, rel + d.name + "/", depth + 1);
+      } else if (d.isFile() && depth > 0 && PATCH_FILE.test(rel + d.name) && !skip.has(abs) && out.length < 30) {
+        const st = statSync(abs);
+        if (st.size <= 2 * 1024 * 1024) out.push({ path: rel + d.name, size: st.size, code: readFileSync(abs, "utf8") });
       }
+    }
+  };
+  walk(engine, "", 0);
+  return out;
+}
+
+function discover() {
+  const scan = scanData();
+  const registry = JSON.parse(readFileSync(join(capDir, "installed.json"), "utf8"));
+  const installed = (Array.isArray(registry.packages) ? registry.packages : []).filter((x) => x && typeof x.id === "string");
+  const envValues = readEnv(envFile);
+  const opts = nodeOptionsOf(envValues.NODE_OPTIONS);
+  const runtime = opts.requires.map((value, order) => {
+    const abs = requirePath(value);
+    const rel = relEngine(abs);
+    const item = { value, path: rel || toSlash(abs), inEngine: !!rel, order, exists: existsSync(abs) };
+    if (!item.exists) return item;
+    const text = readFileSync(abs, "utf8");
+    return { ...item, size: statSync(abs).size, sha256: sha256(text), ...describe(text, abs), targets: targetsOf(text, installed), configs: configsOf(text, abs, envValues) };
+  });
+  const runtimeFiles = runtime.filter((r) => r.exists).map((r) => requirePath(r.value));
+  for (const b of scan.backups) b.scope = "package";
+  return {
+    ...scan,
+    backups: [...scan.backups, ...engineBackups(runtimeFiles)],
+    runtime,
+    nodeOptionsOther: opts.other,
+    scripts: findScripts(new Set(runtimeFiles)),
+  };
+}
+
+/** Deletes only what a fresh look still lists as a backup, whatever the job names. */
+function cleanBackups(paths) {
+  const allowed = new Map(discover().backups.map((b) => [b.path, b]));
+  let removed = 0;
+  for (const p of Array.isArray(paths) ? paths : []) {
+    const b = allowed.get(p);
+    if (!b) continue;
+    const abs = b.scope === "engine" ? resolve(engine, ...p.slice("engine/".length).split("/")) : resolve(capDir, ...p.split("/"));
+    if (!relEngine(abs) && !abs.startsWith(capDir + sep)) continue;
+    try {
+      rmSync(abs, { recursive: !!b.dir, force: true });
+      removed += 1;
+      say("백업본을 지웠습니다: " + p);
     } catch {}
   }
   return removed;
+}
+
+/** NODE_OPTIONS with the engine's runtime patches set to the list given, everything else kept as it was. */
+function nextNodeOptions(rels) {
+  const current = nodeOptionsOf(readEnv(envFile).NODE_OPTIONS);
+  const outside = current.requires.filter((v) => !relEngine(requirePath(v)));
+  const quote = (p) => (/\s/.test(p) ? '"' + p + '"' : p);
+  const keep = [...current.other, ...outside.map((v) => "--require=" + quote(v))];
+  const wanted = rels.map((rel) => "--require=" + quote(toSlash(resolve(engine, ...rel.split("/")))));
+  return [...keep, ...wanted].join(" ");
+}
+
+function writeNodeOptions(value) {
+  const text = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+  writeFileSync(envFile + ".patch-manager-backup", text);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^\s*(?:export\s+)?NODE_OPTIONS\s*=/.test(l));
+  const line = "NODE_OPTIONS=" + value;
+  if (at >= 0) lines[at] = line;
+  else lines.splice(lines[lines.length - 1] === "" ? lines.length - 1 : lines.length, 0, line);
+  writeFileSync(envFile, lines.join(eol));
 }
 
 function signed(job, payload) {
@@ -1482,14 +1717,44 @@ async function watch() {
       else {
         try {
           const removed = job.kind === "clean" ? cleanBackups(paths) : 0;
-          fields = { error: null, scan: { ...scanData(), jobId: job.id, removed } };
-          if (job.kind === "scan") say("data 폴더를 검사했습니다.");
+          fields = { error: null, scan: { ...discover(), jobId: job.id, removed } };
+          if (job.kind === "scan") say("설치된 패치를 찾았습니다.");
         } catch (e) {
           fields = { error: "검사하지 못했습니다: " + e.message };
         }
       }
       if (fields.error) say("작업을 처리하지 못했습니다: " + fields.error);
       await report({ seenJob: job.id, doneJob: job.id, ...fields }).catch(() => {});
+      continue;
+    }
+    if (job.kind === "runtime") {
+      config.done = [...config.done, job.id].slice(-50);
+      saveConfig();
+      const rels = Array.isArray(job.requires) ? job.requires.map(String) : [];
+      let problem = "";
+      if (!(Date.now() - Date.parse(job.at) < 15 * 60 * 1000)) problem = "15분이 넘은 작업이라 실행하지 않았습니다.";
+      else if (!signed(job, rels.join(","))) problem = "연결 코드가 맞지 않는 작업이라 실행하지 않았습니다. 패치 관리자에 연결 코드를 다시 넣어 주세요.";
+      else {
+        for (const rel of rels) {
+          const abs = resolve(engine, ...rel.split("/"));
+          if (rel.split("/").some((x) => !x || x === "." || x === "..") || !relEngine(abs) || !/\.(c?js|mjs)$/i.test(rel) || !existsSync(abs)) problem = "켤 수 없는 파일입니다: " + rel;
+        }
+      }
+      if (problem) {
+        say("작업을 거절했습니다: " + problem);
+        await report({ seenJob: job.id, doneJob: job.id, error: problem }).catch(() => {});
+        continue;
+      }
+      say("런타임 패치 설정을 받았습니다 (켜짐 " + rels.length + "개). 마리나라를 재시작합니다.");
+      pending = { job, nodeOptions: nextNodeOptions(rels) };
+      try {
+        await report({ seenJob: job.id, error: null });
+        await api("/admin/restart", "POST", { confirm: true });
+      } catch (e) {
+        pending = null;
+        say("재시작하지 못했습니다: " + e.message);
+        await report({ doneJob: job.id, error: "재시작하지 못했습니다: " + e.message }).catch(() => {});
+      }
       continue;
     }
     const list = verify(job, value);
@@ -1524,6 +1789,27 @@ async function rebuildIfNeeded() {
   if (!changed) return true;
   say("빌드한 뒤 바뀐 서버 파일이 있어 다시 빌드합니다: dist/" + changed);
   return (await exited(spawn(process.execPath, [join(serverRoot, "scripts", "build.mjs")], { cwd: serverRoot, stdio: "inherit" }))) === 0;
+}
+
+// Look only: what the manager would see, without starting Marinara.
+if (args.includes("--discover")) {
+  const d = discover();
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(d));
+    process.exit(0);
+  }
+  console.log("런타임 패치 (NODE_OPTIONS 순서):");
+  for (const r of d.runtime) {
+    const t = (r.targets || []).map((x) => x.name + " " + x.wants.join("/") + (x.wants.includes(x.installed) ? "" : " ≠ 설치 " + x.installed)).join(", ");
+    console.log("  " + (r.order + 1) + ". " + (r.name || r.path) + (r.exists ? "" : " [파일 없음]") + "  " + r.path + (t ? "  · 대상 " + t : "") + ((r.configs || []).length ? "  · 설정 " + r.configs.map((c) => c.path).join(", ") : ""));
+  }
+  console.log("파일 패치 스크립트:");
+  for (const s of d.scripts) console.log("  " + s.path);
+  console.log("패키지 속 패치 표식:");
+  for (const p of d.packages.filter((x) => x.markers.length)) console.log("  " + p.id + " " + p.version + ": " + p.markers.join(", "));
+  console.log("백업본:");
+  for (const b of d.backups) console.log("  " + b.path + (b.dir ? "/" : "") + "  (" + Math.round(b.size / 1024) + "KB)");
+  process.exit(0);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -1567,7 +1853,7 @@ for (;;) {
   child = spawn(process.execPath, ["dist/index.js"], {
     cwd: serverRoot,
     stdio: "inherit",
-    env: { ...env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
+    env: { ...launchEnv(), MARINARA_RESTART_SUPERVISOR: String(process.pid) },
   });
   const code = await exited(child);
   child = null;
@@ -1576,7 +1862,18 @@ for (;;) {
     process.exitCode = stopping ? 0 : code;
     break;
   }
-  if (pending) {
+  if (pending && pending.nodeOptions !== undefined) {
+    // Runtime patches: .env is read at the next start, so this is the whole change.
+    const job = pending.job;
+    try {
+      writeNodeOptions(pending.nodeOptions);
+      say("NODE_OPTIONS를 바꿨습니다 (이전 .env는 .env.patch-manager-backup). 마리나라를 다시 켭니다.");
+      unsent = { doneJob: job.id, error: null, result: { ok: true, at: new Date().toISOString(), mode: "runtime", items: [], log: "NODE_OPTIONS=" + pending.nodeOptions }, scan: { ...discover(), jobId: job.id } };
+    } catch (e) {
+      unsent = { doneJob: job.id, error: "NODE_OPTIONS를 바꾸지 못했습니다: " + e.message };
+    }
+    pending = null;
+  } else if (pending) {
     const job = pending;
     try {
       await runJob(job);
@@ -1645,6 +1942,100 @@ async function helperTask(kind, paths = []) {
   if (helper.error) throw new Error(helper.error);
   if (!isObj(helper.scan) || helper.scan.jobId !== job.id) throw new Error("도우미가 검사 결과를 보내지 않았습니다.");
   return helper.scan;
+}
+
+/** Take what the helper found on the server: runtime patches in NODE_OPTIONS order, patch scripts, markers, backups. */
+async function useDiscovery(scan) {
+  state.scan = {
+    at: scan.at,
+    writable: true,
+    via: "helper",
+    packages: scan.packages || [],
+    backups: (scan.backups || []).map((b) => ({ ...b, entry: null })),
+    runtime: scan.runtime || [],
+    nodeOptionsOther: scan.nodeOptionsOther || [],
+    scripts: (scan.scripts || []).map(({ path, size }) => ({ path, size })),
+  };
+  const sync = await syncDiscovery(scan);
+  state.scanResult = { ...applyScan(state.scan), ...sync };
+  scheduleSave(sync.scripts > 0);
+}
+
+async function syncDiscovery(scan) {
+  const now = new Date().toISOString();
+  const result = { runtimeAdded: [], scriptsAdded: [], scripts: 0 };
+  if (!Array.isArray(scan.runtime)) return result;
+  const seen = new Set();
+  for (const r of scan.runtime) {
+    if (!r.inEngine) continue;
+    const rt = { path: r.path, value: r.value, exists: r.exists, actual: true, order: r.order, targets: r.targets || [], configs: r.configs || [], size: r.size || 0, seenAt: now };
+    let p = state.patches.find((x) => isRuntime(x) && x.rt?.path === r.path);
+    if (!p) {
+      p = cleanPatch({ id: newId("p"), kind: "runtime", name: r.name || r.path.split("/").pop(), description: r.description || "", file: r.path.split("/").pop(), target: rt.targets[0]?.id || "", hash: r.sha256 || "", size: r.size, addedAt: now, updatedAt: now, source: { kind: "local", fileName: r.path }, rt });
+      state.patches.push(p);
+      result.runtimeAdded.push(p.id);
+    } else {
+      p.rt = rt;
+      if (r.sha256 && r.sha256 !== p.hash) {
+        p.hash = r.sha256;
+        p.updatedAt = now;
+      }
+      if (r.description) p.description = r.description;
+    }
+    seen.add(p.id);
+  }
+  // What the server has decides: patches out of NODE_OPTIONS are off, and the load order is NODE_OPTIONS order.
+  for (const p of runtimeItems()) {
+    if (!seen.has(p.id)) p.rt = { ...p.rt, actual: false };
+    p.include = !!p.rt.actual && p.rt.exists !== false;
+  }
+  orderRuntimeByActual();
+  // Patch scripts lying in the add-on folders join the list (their markers then tell whether they are applied).
+  for (const sc of Array.isArray(scan.scripts) ? scan.scripts : []) {
+    if (typeof sc.code !== "string") continue;
+    const pkg = await makePkg(sc.code, sc.path, { kind: "local", fileName: "엔진 폴더/" + sc.path });
+    if (state.patches.some((x) => x.hash === pkg.hash)) continue;
+    if (!fitsStorage(pkg.text)) break;
+    result.scriptsAdded.push(createPatch(pkg, false).id);
+    result.scripts += 1;
+  }
+  return result;
+}
+
+/** The NODE_OPTIONS line the manager wants, for putting into .env by hand. */
+function runtimeLine() {
+  const quote = (v) => (/\s/.test(v) ? `"${v}"` : v);
+  const wanted = runtimeItems().filter((p) => p.include && p.rt?.exists !== false && p.rt.value);
+  return "NODE_OPTIONS=" + [...(state.scan?.nodeOptionsOther || []), ...wanted.map((p) => "--require=" + quote(p.rt.value))].join(" ");
+}
+
+/** Turn runtime patches on/off and set their order: the helper rewrites NODE_OPTIONS while Marinara restarts. */
+async function applyRuntime() {
+  if (state.auto?.busy) return;
+  const key = helperCode();
+  if (!key) return notice("도우미 연결 코드가 없습니다. 아래 줄을 .env에 직접 넣고 마리나라를 다시 켜도 됩니다.");
+  const requires = runtimeWanted();
+  state.auto = { busy: "런타임 패치 설정을 보내는 중…", jobId: null, error: "" };
+  render();
+  try {
+    const job = { id: newId("j"), kind: "runtime", at: new Date().toISOString(), requires };
+    job.mac = hmacHex(key, [job.id, "runtime", job.at, requires.join(",")].join("|"));
+    state.auto.jobId = job.id;
+    await marinara.storage.patch({ helperJob: job });
+    const got = await waitHelper((h) => h.seenJob === job.id || h.doneJob === job.id, 20e3, HELPER_SILENT);
+    if (got.doneJob !== job.id) {
+      state.auto = { ...state.auto, busy: "마리나라를 재시작하며 NODE_OPTIONS를 바꾸는 중… (잠깐 연결이 끊깁니다)" };
+      renderSoft();
+      await waitHelper((h) => h.doneJob === job.id, 5 * 60e3, "5분 안에 끝나지 않았습니다. 도우미 창을 확인해 주십시오.");
+    }
+    if (state.helper.error) throw new Error(state.helper.error);
+    if (isObj(state.helper.scan)) await useDiscovery(state.helper.scan);
+    state.auto = { busy: "", jobId: job.id, error: "" };
+    notice("런타임 패치 설정을 적용했습니다.");
+  } catch (err) {
+    state.auto = { ...state.auto, busy: "", error: err instanceof Error ? err.message : String(err) };
+  }
+  render();
 }
 
 /** Ask the helper to patch: sign the job, hand it over through storage, then follow the restart. */
@@ -1730,7 +2121,7 @@ function saveFile(name, text, type) {
   marinara.setTimeout(() => URL.revokeObjectURL(url), 1e4);
 }
 
-const runList = () => state.patches.filter((p) => p.include && typeof state.scripts[p.id] === "string");
+const runList = () => state.patches.filter((p) => p.include && !isRuntime(p) && typeof state.scripts[p.id] === "string");
 
 /** Download a runner for the given patches and remember the packages as they are, to see the run land later. */
 async function downloadRunner(list, mode, name = BUNDLE_NAME) {
@@ -1888,6 +2279,8 @@ function matches(p) {
   if (f.gh === "linked" && p.source.kind !== "github") return false;
   if (f.gh === "update" && !state.updates.has(p.id)) return false;
   if (f.gh === "excluded" && p.include) return false;
+  if (f.gh === "runtime" && !isRuntime(p)) return false;
+  if (f.gh === "script" && isRuntime(p)) return false;
   if (f.pinned && !p.pinned) return false;
   if (f.q) {
     const hay = [p.name, p.description, p.file, p.target, targetOf(p)?.name, p.note, ...p.tags, groupOf(p.group)?.name, p.source.repo, p.source.path]
@@ -1925,7 +2318,9 @@ function filterCrumb() {
     f.target && `대상 ${f.target}`,
     f.gh === "linked" && "GitHub 연결됨",
     f.gh === "update" && "업데이트 있음",
-    f.gh === "excluded" && "실행 목록에서 뺌",
+    f.gh === "excluded" && "꺼짐 · 실행 목록에서 뺌",
+    f.gh === "runtime" && "런타임 패치",
+    f.gh === "script" && "파일 패치",
     f.tag && `#${f.tag}`,
   ].filter(Boolean);
   return `${group} > ${f.status === "all" ? "전체" : STATUS[f.status].label}${extra.length ? `, ${extra.join(", ")}` : ""}`;
@@ -1975,14 +2370,17 @@ function renderSide() {
   const linked = count((p) => p.source.kind === "github");
   const updates = count((p) => state.updates.has(p.id));
   const excluded = count((p) => !p.include);
+  const runtimeCount = count(isRuntime);
   const all = state.checkingAll;
   const ghBlock =
-    linked || excluded
+    linked || excluded || runtimeCount
       ? `<div class="pmgr-side-block">
-            <div class="pmgr-side-title">출처 · 실행</div>
+            <div class="pmgr-side-title">종류 · 출처</div>
+            ${runtimeCount ? navItem("f-gh", "runtime", f.gh === "runtime", icon("terminal", 14), "런타임 패치", runtimeCount) : ""}
+            ${runtimeCount ? navItem("f-gh", "script", f.gh === "script", icon("fileCode", 14), "파일 패치", items.length - runtimeCount) : ""}
             ${linked ? navItem("f-gh", "linked", f.gh === "linked", icon("github", 14), "GitHub 연결됨", linked) : ""}
             ${updates ? navItem("f-gh", "update", f.gh === "update", icon("arrowUp", 14), "업데이트 있음", updates) : ""}
-            ${excluded ? navItem("f-gh", "excluded", f.gh === "excluded", icon("powerOff", 14), "실행 목록에서 뺌", excluded) : ""}
+            ${excluded ? navItem("f-gh", "excluded", f.gh === "excluded", icon("powerOff", 14), "꺼짐 · 목록에서 뺌", excluded) : ""}
             ${linked ? `<button type="button" class="pmgr-nav pmgr-nav-add" data-act="gh-check-all"${all ? " disabled" : ""}>${icon(all ? "loader" : "refresh", 14)}<span class="pmgr-nav-label">${all ? `확인 중 ${all.done}/${all.total}` : "업데이트 모두 확인"}</span></button>` : ""}
         </div>`
       : "";
@@ -2028,10 +2426,16 @@ const groupedView = () => state.prefs.grouped && state.groups.length > 0 && !sta
 function statusPill(p) {
   const key = statusOf(p);
   const update = state.updates.has(p.id) ? `<span class="pmgr-status is-update" title="GitHub에 새 코드가 있습니다">${icon("arrowUp", 11)}업데이트</span>` : "";
-  return `<span class="pmgr-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${STATUS[key].label}</span>${update}`;
+  return `<span class="pmgr-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${esc(labelOf(p))}</span>${update}`;
 }
 
 function targetChip(p) {
+  if (isRuntime(p)) {
+    const ts = p.rt?.targets || [];
+    return ts.length
+      ? ts.map((t) => `<span class="pmgr-chip" title="이 패치가 맞춘 버전 · 지금 설치 ${esc(installedVersion(t))}">${icon("package", 11)}${esc(t.name)} ${esc(t.wants.join("/"))}</span>`).join("")
+      : `<span class="pmgr-chip" title="특정 패키지 버전에 매이지 않음">${icon("package", 11)}엔진 전반</span>`;
+  }
   if (!p.target) return `<span class="pmgr-chip" title="대상 패키지 미지정">${icon("package", 11)}대상 미지정</span>`;
   const t = targetOf(p);
   return `<span class="pmgr-chip" title="${esc(targetLabel(p.target))}">${icon("package", 11)}${esc(t?.name || p.target)}${t?.version ? ` ${esc(t.version)}` : ""}</span>`;
@@ -2051,20 +2455,20 @@ function card(p) {
   const common = `data-act="select" data-id="${id}"${tint ? ` style="--pm-on:${esc(tint)}"` : ""}`;
   const check = `<button type="button" class="pmgr-check${checked ? " is-on" : ""}" data-act="check" data-id="${id}" aria-pressed="${checked}" aria-label="선택">${icon("check", 11)}</button>`;
   const pin = `<button type="button" class="pmgr-pin${p.pinned ? " is-on" : ""}" data-act="pin" data-id="${id}" aria-pressed="${p.pinned}" title="${p.pinned ? "고정 해제" : "위에 고정"}" aria-label="고정">${icon("pin", 13)}</button>`;
-  const includeLabel = p.include ? "실행 목록에서 빼기" : "실행 목록에 넣기";
+  const includeLabel = isRuntime(p) ? (p.include ? "끄기 (재시작해서 적용)" : "켜기 (재시작해서 적용)") : p.include ? "실행 목록에서 빼기" : "실행 목록에 넣기";
   const actions = `<div class="pmgr-card-actions">
         <button type="button" class="pmgr-act${p.include ? " is-on" : ""}" data-act="include" data-id="${id}" title="${includeLabel}" aria-label="${includeLabel}">${icon(p.include ? "power" : "powerOff", 13)}</button>
-        <button type="button" class="pmgr-act" data-act="run-one" data-id="${id}" title="이 패치만 실행하는 파일 받기" aria-label="이 패치만 실행하는 파일 받기">${icon("download", 13)}</button>
+        ${isRuntime(p) ? "" : `<button type="button" class="pmgr-act" data-act="run-one" data-id="${id}" title="이 패치만 실행하는 파일 받기" aria-label="이 패치만 실행하는 파일 받기">${icon("download", 13)}</button>`}
         <button type="button" class="pmgr-act is-danger" data-act="delete" data-id="${id}" title="삭제" aria-label="삭제">${icon("trash", 13)}</button></div>`;
   const cls = `is-${STATUS[key].css}${checked ? " is-checked" : ""}${selected ? " is-selected" : ""}${p.include ? "" : " is-excluded"}`;
   const order = state.prefs.sort === "order" ? `<span class="pmgr-order">${state.patches.indexOf(p) + 1}</span>` : "";
-  const badges = `${p.source.kind === "github" ? `<span class="pmgr-badge" title="${esc(p.source.repo)}">${icon("github", 11)}</span>` : `<span class="pmgr-badge" title="파일에서 추가">${icon("fileCode", 11)}</span>`}${p.restore ? `<span class="pmgr-badge" title="--restore로 되돌릴 수 있음">${icon("undo", 11)}</span>` : ""}`;
+  const badges = isRuntime(p) ? `<span class="pmgr-badge is-runtime" title="NODE_OPTIONS --require로 불러오는 런타임 패치">${icon("terminal", 11)}런타임</span>` : `${p.source.kind === "github" ? `<span class="pmgr-badge" title="${esc(p.source.repo)}">${icon("github", 11)}</span>` : `<span class="pmgr-badge" title="파일에서 추가">${icon("fileCode", 11)}</span>`}${p.restore ? `<span class="pmgr-badge" title="--restore로 되돌릴 수 있음">${icon("undo", 11)}</span>` : ""}`;
   if (state.prefs.view === "list") {
     return `<div class="pmgr-row ${cls}" ${common}>
             ${check}
-            <span class="pmgr-row-dot is-${STATUS[key].css}" title="${esc(STATUS[key].label)}"></span>
+            <span class="pmgr-row-dot is-${STATUS[key].css}" title="${esc(labelOf(p))}"></span>
             <div class="pmgr-row-main">
-                <div class="pmgr-row-name">${order}<strong><button type="button" class="pmgr-name-button" data-act="select" data-id="${id}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong><span class="pmgr-ver">${esc(p.file)}</span>${state.updates.has(p.id) ? `<span class="pmgr-status is-update">${icon("arrowUp", 11)}업데이트</span>` : ""}${p.note ? `<span class="pmgr-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
+                <div class="pmgr-row-name">${order}<strong><button type="button" class="pmgr-name-button" data-act="select" data-id="${id}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong><span class="pmgr-ver">${esc(isRuntime(p) ? p.rt.path : p.file)}</span>${state.updates.has(p.id) ? `<span class="pmgr-status is-update">${icon("arrowUp", 11)}업데이트</span>` : ""}${p.note ? `<span class="pmgr-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
                 <div class="pmgr-row-desc">${esc(p.description || "설명 없음")}</div>
             </div>
             <div class="pmgr-row-meta">${targetChip(p)}${group ? `<span class="pmgr-chip is-group"><span class="pmgr-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${badges}</div>
@@ -2079,6 +2483,30 @@ function card(p) {
         <div class="pmgr-card-chips">${targetChip(p)}${group ? `<span class="pmgr-chip is-group"><span class="pmgr-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${p.note ? `<span class="pmgr-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
         <div class="pmgr-card-foot"><div class="pmgr-badges">${badges}</div>${actions}</div>
     </article>`;
+}
+
+function orderRuntimeByActual() {
+  const slots = state.patches.map((p, i) => (isRuntime(p) ? i : -1)).filter((i) => i >= 0);
+  const ordered = slots.map((i) => state.patches[i]).sort((a, b) => (a.rt.actual ? a.rt.order : 1e6) - (b.rt.actual ? b.rt.order : 1e6));
+  slots.forEach((slot, i) => (state.patches[slot] = ordered[i]));
+}
+
+function runtimeBanner() {
+  if (!runtimeChanged()) return "";
+  const busy = state.auto?.busy;
+  const line = runtimeLine();
+  const code = helperCode();
+  return `<div class="pmgr-banner">
+        ${icon("clock", 14)}
+        <div class="pmgr-banner-text"><strong>런타임 패치 변경 ${runtimePending().size}건 · 아직 반영 안 됨</strong>
+        <span>마리나라는 NODE_OPTIONS를 켤 때만 읽으므로 재시작해야 반영됩니다. ${code ? "[재시작해서 적용]을 누르면 도우미가 .env를 바꾸고 마리나라를 다시 켭니다." : "도우미가 없으면 .env의 NODE_OPTIONS 줄을 아래로 바꾸고 마리나라를 다시 켜 주십시오."}</span>
+        <div class="pmgr-cmd"><code>${esc(line)}</code><button type="button" class="pmgr-icon-btn" data-act="copy" data-v="${esc(line)}" title="복사" aria-label="NODE_OPTIONS 줄 복사">${icon("copy", 13)}</button></div>
+        ${state.auto?.error ? `<span class="pmgr-err">${esc(state.auto.error)}</span>` : ""}</div>
+        <div class="pmgr-banner-actions">
+            <button type="button" class="pmgr-btn is-primary" data-act="runtime-apply"${busy || !code ? " disabled" : ""}>${icon(busy ? "loader" : "refresh", 13)}${busy ? esc(busy) : "재시작해서 적용"}</button>
+            <button type="button" class="pmgr-btn is-ghost" data-act="runtime-revert"${busy ? " disabled" : ""}>바꾼 것 취소</button>
+        </div>
+    </div>`;
 }
 
 function runBanner() {
@@ -2138,7 +2566,7 @@ function renderList() {
       content = wrap(visible);
     }
   }
-  setHtml(refs.main, `${toolbar}<div class="pmgr-scroll">${runBanner()}${targetsWarn}${content}</div>${bulkHtml()}`);
+  setHtml(refs.main, `${toolbar}<div class="pmgr-scroll">${runtimeBanner()}${runBanner()}${targetsWarn}${content}</div>${bulkHtml()}`);
 }
 
 function bulkHtml() {
@@ -2411,7 +2839,12 @@ function scanViewHtml() {
   if (scan) {
     const r = state.scanResult;
     const summary = r
-      ? [r.found.length && `적용됨으로 표시: ${r.found.map(name).join(", ")}`, r.gone.length && `흔적이 없어 적용 기록을 지움: ${r.gone.map(name).join(", ")}`].filter(Boolean)
+      ? [
+          r.runtimeAdded?.length && `런타임 패치 ${r.runtimeAdded.length}개를 관리자에 추가: ${r.runtimeAdded.map(name).join(", ")}`,
+          r.scriptsAdded?.length && `파일 패치 ${r.scriptsAdded.length}개를 관리자에 추가: ${r.scriptsAdded.map(name).join(", ")}`,
+          r.found.length && `적용됨으로 표시: ${r.found.map(name).join(", ")}`,
+          r.gone.length && `흔적이 없어 적용 기록을 지움: ${r.gone.map(name).join(", ")}`,
+        ].filter(Boolean)
       : [];
     const relevant = scan.packages.filter((pkg) => pkg.markers.length || state.patches.some((p) => p.target === pkg.id));
     const pkgRows = relevant
@@ -2434,7 +2867,7 @@ function scanViewHtml() {
       .map((b) => {
         const confirming = state.confirmBackup === b.path;
         return `<div class="pmgr-run-row">
-            <div class="pmgr-run-main"><strong class="pmgr-mono">${esc(b.path.split("/").pop())}</strong><span>${esc(b.path)} · ${kb(b.size)} · ${fmtDate(b.modified)}${b.current ? "" : " · 지금 쓰지 않는 옛 버전"}</span></div>
+            <div class="pmgr-run-main"><strong class="pmgr-mono">${esc(b.path.split("/").pop())}${b.dir ? "/ (폴더)" : ""}</strong><span>${esc(b.scope === "engine" ? b.path.slice("engine/".length) : b.path)} · ${kb(b.size)} · ${fmtDate(b.modified)}${b.scope === "engine" ? ` · ${esc(b.group)}` : b.current ? "" : " · 지금 쓰지 않는 옛 버전"}</span></div>
             ${scan.writable ? `<button type="button" class="pmgr-btn${confirming ? " is-danger" : " is-ghost"}" data-act="backup-del" data-v="${esc(b.path)}"${busy ? " disabled" : ""}>${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>` : ""}
         </div>`;
       })
@@ -2442,12 +2875,19 @@ function scanViewHtml() {
     body = `
             ${summary.length ? `<div class="pmgr-flow-note is-ok">${icon("circleCheck", 14)}<span>${summary.map(esc).join("<br>")}</span></div>` : ""}
             <p class="pmgr-hint">${fmtTime(scan.at)} 검사 · 설치 패키지 ${scan.packages.length}개</p>
+            ${runtimeSectionHtml(scan)}
+            ${
+              scan.scripts?.length
+                ? `<div class="pmgr-side-title">애드온 폴더의 파일 패치 스크립트 · ${scan.scripts.length}개</div>
+                   <ul class="pmgr-plain-list">${scan.scripts.map((x) => `<li><span class="pmgr-mono">${esc(x.path)}</span> <span class="pmgr-hint">· 관리자 목록에 있음</span></li>`).join("")}</ul>`
+                : ""
+            }
             <div class="pmgr-side-title">설치 패키지 속 패치</div>
             ${pkgRows || '<p class="pmgr-hint">패치가 들어 있는 패키지가 없습니다.</p>'}
             <div class="pmgr-side-title">패치 백업본 · ${scan.backups.length}개${scan.backups.length ? ` · ${kb(total)}` : ""}</div>
             ${
               scan.backups.length
-                ? `<p class="pmgr-hint">패치가 처음 들어갈 때 남긴 원본 파일입니다(예: server.mjs.gmm-backup). 지워도 마리나라와 패치는 그대로 동작합니다. --restore를 지원하는 패치는 백업본 없이도 되돌릴 수 있지만, 지원하지 않는 패치는 백업본이 유일한 원본일 수 있습니다.</p>
+                ? `<p class="pmgr-hint">패치를 깔거나 고칠 때 남은 옛 사본입니다: 패키지 원본(server.mjs.gmm-backup 등), .env 사본(.env.before-…), 애드온 폴더의 .bak · .before-… · 옛 버전 사본, .prev · .backup-… 폴더. 지금 쓰는 파일은 목록에 넣지 않으므로 지워도 마리나라와 패치는 그대로 동작합니다. 다만 되돌릴 때 쓸 원본이 없어지니, 되돌릴 일이 없을 때 지우세요.</p>
                    ${backupRows}
                    <div class="pmgr-flow-actions">${
                      scan.writable
@@ -2465,12 +2905,12 @@ function scanViewHtml() {
   }
   return `<div class="pmgr-toolbar">
             <button type="button" class="pmgr-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
-            <strong class="pmgr-toolbar-title">${icon("folderSearch", 14)}검사 · 백업본</strong>
+            <strong class="pmgr-toolbar-title">${icon("folderSearch", 14)}설치된 패치 · 백업본</strong>
         </div>
         <div class="pmgr-scroll"><div class="pmgr-flow-wrap pmgr-settings">
-            <p class="pmgr-hint">설치 패키지 파일 속에 어떤 패치가 실제로 들어 있는지와 패치가 남긴 백업본을 찾습니다. 예전에 직접 적용해 둔 패치도 여기서 찾아 적용됨으로 표시합니다.</p>
+            <p class="pmgr-hint">마리나라에 깔린 패치를 모두 찾아 관리자에 반영합니다. .env의 NODE_OPTIONS로 불러오는 <strong>런타임 패치</strong>(.cjs)와, 패키지 파일을 고치는 <strong>파일 패치</strong>(patch/apply-patch.mjs 같은 것)가 들어 있는지, 그리고 남은 백업본을 찾습니다. 서버의 파일을 읽어야 하므로 도우미로 검사하는 것을 권합니다.</p>
             <div class="pmgr-flow-actions">
-                <button type="button" class="pmgr-btn${remote ? " is-primary" : ""}" data-act="scan-helper"${busy || !helperCode() ? " disabled" : ""}>${icon(busy ? "loader" : "terminal", 13)}서버에서 검사 (도우미)</button>
+                <button type="button" class="pmgr-btn${remote ? " is-primary" : ""}" data-act="scan-helper"${busy || !helperCode() ? " disabled" : ""}>${icon(busy ? "loader" : "terminal", 13)}설치된 패치 찾기 (도우미)</button>
                 <button type="button" class="pmgr-btn${remote ? "" : " is-primary"}" data-act="scan-pick"${busy ? " disabled" : ""}>${icon(busy ? "loader" : "folderSearch", 13)}이 컴퓨터에서 폴더 고르기</button>
                 ${typeof window.showDirectoryPicker === "function" ? `<button type="button" class="pmgr-btn is-ghost" data-act="scan-pick-plain"${busy ? " disabled" : ""} title="브라우저가 '이 폴더를 열 수 없음'이라고 할 때">${icon("folder", 13)}다른 방식으로 고르기</button>` : ""}
             </div>
@@ -2480,6 +2920,36 @@ function scanViewHtml() {
             ${state.scanError ? `<div class="pmgr-flow-status is-error">${icon("circleX", 13)}${esc(state.scanError)}</div>` : ""}
             ${body}
         </div></div>`;
+}
+
+/** Runtime patches as the server loads them, with on/off and order to change (applied on the next start). */
+function runtimeSectionHtml(scan) {
+  if (!Array.isArray(scan.runtime)) {
+    return '<div class="pmgr-side-title">런타임 패치 (NODE_OPTIONS)</div><p class="pmgr-hint">폴더로 검사하면 런타임 패치는 보이지 않습니다. [서버에서 검사 (도우미)]가 .env의 NODE_OPTIONS까지 읽습니다.</p>';
+  }
+  const items = runtimeItems();
+  const outside = scan.runtime.filter((r) => !r.inEngine);
+  const rows = items
+    .map((p, i) => {
+      const key = statusOf(p);
+      const targets = (p.rt.targets || []).map((t) => t.name + " " + t.wants.join("/")).join(", ");
+      return `<div class="pmgr-run-row${p.include ? "" : " is-skip"}">
+            <span class="pmgr-order">${i + 1}</span>
+            <div class="pmgr-run-main"><strong>${esc(p.name)}</strong><span>${esc(p.rt.path)}${targets ? ` · ${esc(targets)}` : ""}${(p.rt.configs || []).length ? ` · 설정 ${p.rt.configs.length}개` : ""}</span></div>
+            <span class="pmgr-status is-${STATUS[key].css}" title="${esc(statusInfo(p).reason)}">${icon(STATUS[key].icon, 11)}${esc(labelOf(p))}</span>
+            <span class="pmgr-run-tools">
+                <button type="button" class="pmgr-act" data-act="move-up" data-id="${esc(p.id)}"${i ? "" : " disabled"} title="먼저 불러오기" aria-label="앞으로">${icon("chevronUp", 13)}</button>
+                <button type="button" class="pmgr-act" data-act="move-down" data-id="${esc(p.id)}"${i < items.length - 1 ? "" : " disabled"} title="나중에 불러오기" aria-label="뒤로">${icon("chevronDown", 13)}</button>
+                <button type="button" class="pmgr-act${p.include ? " is-on" : ""}" data-act="include" data-id="${esc(p.id)}" title="${p.include ? "끄기" : "켜기"}" aria-label="${p.include ? "끄기" : "켜기"}">${icon(p.include ? "power" : "powerOff", 13)}</button>
+            </span>
+        </div>`;
+    })
+    .join("");
+  return `<div class="pmgr-side-title">런타임 패치 (NODE_OPTIONS 순서) · 켜짐 ${runtimeActual().length}개</div>
+        <p class="pmgr-hint">마리나라가 켜질 때 위에서부터 불러옵니다. 서로 기대는 패치는 순서가 중요합니다(예: gf-featured는 gf-customizer 뒤). 켜기·끄기·순서를 바꾸면 [재시작해서 적용]으로 반영합니다.</p>
+        ${runtimeBanner()}
+        ${rows || '<p class="pmgr-hint">.env의 NODE_OPTIONS에 런타임 패치가 없습니다.</p>'}
+        ${outside.length ? `<p class="pmgr-hint">엔진 폴더 밖이라 그대로 두는 것: ${outside.map((r) => esc(r.path)).join(", ")}</p>` : ""}`;
 }
 
 /** A scan the helper runs on the server; the result has the same shape as a folder scan. */
@@ -2494,8 +2964,7 @@ async function runHelperScan(kind = "scan", paths = []) {
       state.targets = await loadTargets();
     } catch {}
     const scan = await helperTask(kind, paths);
-    state.scan = { at: scan.at, writable: true, via: "helper", packages: scan.packages || [], backups: (scan.backups || []).map((b) => ({ ...b, entry: null })) };
-    state.scanResult = applyScan(state.scan);
+    await useDiscovery(scan);
     if (kind === "clean") notice(`백업본 ${scan.removed || 0}개를 지웠습니다.`);
   } catch (err) {
     state.scanError = err instanceof Error ? err.message : String(err);
@@ -2645,9 +3114,9 @@ async function readBackup(file) {
   }
   if (!isObj(raw) || raw.kind !== BACKUP_KIND) return notice("패치 관리자 백업 파일이 아닙니다.");
   const scripts = isObj(raw.scripts) ? raw.scripts : {};
-  const patches = (Array.isArray(raw.patches) ? raw.patches : []).map(cleanPatch).filter((p) => p && typeof scripts[p.id] === "string");
+  const patches = (Array.isArray(raw.patches) ? raw.patches : []).map(cleanPatch).filter((p) => p && hasCode(p, scripts));
   // A script is taken only when it still hashes to what the record says.
-  for (const p of patches) if ((await sha256Hex(scripts[p.id])) !== p.hash) return notice(`백업 속 "${p.name}" 코드가 손상되었습니다.`);
+  for (const p of patches) if (!isRuntime(p) && (await sha256Hex(scripts[p.id])) !== p.hash) return notice(`백업 속 "${p.name}" 코드가 손상되었습니다.`);
   const groups = (Array.isArray(raw.groups) ? raw.groups : []).filter((g) => isObj(g) && typeof g.id === "string" && g.id && typeof g.name === "string" && g.name);
   const groupIds = new Set(groups.map((g) => g.id));
   for (const p of patches) if (p.group && !groupIds.has(p.group)) p.group = null;
@@ -2656,7 +3125,7 @@ async function readBackup(file) {
   state.backupPreview = {
     fileName: file.name,
     savedAt: typeof raw.savedAt === "string" ? raw.savedAt : null,
-    data: { patches, scripts: Object.fromEntries(patches.map((p) => [p.id, scripts[p.id]])), groups, prefs },
+    data: { patches, scripts: Object.fromEntries(patches.filter((p) => !isRuntime(p)).map((p) => [p.id, scripts[p.id]])), groups, prefs },
   };
   renderMain();
 }
@@ -2726,6 +3195,65 @@ function sourceSectionHtml(p) {
   return `<div class="pmgr-field pmgr-gh">${label}${inner}</div>`;
 }
 
+/** The target, applied record and source of a patch script. */
+function scriptFieldsHtml(p, id, t) {
+  return `
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("package", 12)}대상 패키지</span>
+                <label class="pmgr-flow-input">${icon("package", 14)}<input data-detail-target="${id}" list="pmgr-targets-detail" value="${esc(p.target)}" placeholder="예: gacha-forge" spellcheck="false" autocomplete="off"></label>
+                <datalist id="pmgr-targets-detail">${targetOptions()}</datalist>
+                <p class="pmgr-hint">${t ? `${esc(t.name)} ${esc(t.version)} · ${esc(t.status)}` : p.target ? (state.targets ? "설치되어 있지 않습니다." : "설치 패키지 목록을 읽지 못했습니다.") : "지정하면 적용 여부와 업데이트 후 재실행 필요를 자동으로 확인합니다."}</p>
+            </div>
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("circleCheck", 12)}적용 기록</span>
+                <p class="pmgr-hint">${p.applied ? `${fmtTime(p.applied.at)} · 코드 ${esc(shortHash(p.applied.hash))}${p.applied.version ? ` · 대상 ${esc(p.applied.version)}` : ""}` : "기록 없음"}</p>
+                <div class="pmgr-gh-actions">
+                    <button type="button" class="pmgr-btn" data-act="mark-applied" data-id="${id}">${icon("check", 13)}적용됨으로 표시</button>
+                    ${p.applied ? `<button type="button" class="pmgr-btn is-ghost" data-act="mark-off" data-id="${id}">기록 지우기</button>` : ""}
+                </div>
+            </div>
+            ${sourceSectionHtml(p)}`;
+}
+
+/** What a runtime patch is: the file, where it loads, which versions it was made for, the settings it reads. */
+function runtimeFieldsHtml(p) {
+  const rt = p.rt || {};
+  const targets = rt.targets || [];
+  const configs = rt.configs || [];
+  return `<div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("terminal", 12)}런타임 패치</span>
+                <p class="pmgr-hint">마리나라가 켜질 때 .env의 NODE_OPTIONS(--require)로 불러와, 파일은 바꾸지 않고 불러오는 코드만 고칩니다. 켜기·끄기·순서는 마리나라를 다시 켤 때 반영됩니다.</p>
+                <dl class="pmgr-info">
+                    <dt>파일</dt><dd class="pmgr-mono">${esc(rt.path)}${rt.size ? ` · ${kb(rt.size)}` : ""}</dd>
+                    <dt>불러오는 순서</dt><dd>${rt.actual ? `${rt.order + 1}번째` : "불러오지 않음"}</dd>
+                    <dt>확인</dt><dd>${rt.seenAt ? fmtTime(rt.seenAt) : "-"}</dd>
+                </dl>
+            </div>
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("package", 12)}맞춘 버전</span>
+                ${
+                  targets.length
+                    ? `<ul class="pmgr-plain-list">${targets
+                        .map((t) => {
+                          const now = installedVersion(t);
+                          const ok = t.wants.includes(now);
+                          return `<li><span class="pmgr-status is-${ok ? "on" : "pending"}">${icon(ok ? "circleCheck" : "shieldAlert", 11)}${ok ? "맞음" : "다름"}</span>${esc(t.name)} ${esc(t.wants.join("/"))}용 · 지금 ${esc(now)}</li>`;
+                        })
+                        .join("")}</ul>`
+                    : `<p class="pmgr-hint">특정 패키지 버전 이름이 코드에 없습니다(엔진 전반에 걸리는 패치).</p>`
+                }
+            </div>
+            ${
+              configs.length
+                ? `<div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("fileCode", 12)}설정 파일</span>
+                <ul class="pmgr-plain-list">${configs.map((c) => `<li><span class="pmgr-mono">${esc(c.path)}</span> <span class="pmgr-hint">· ${esc(c.via === "같은 폴더" ? "패치 옆" : ".env " + c.via)}${c.exists ? "" : " · 파일 없음"}</span></li>`).join("")}</ul>
+                <p class="pmgr-hint">패치가 읽는 설정·레시피(JSON)입니다. 바꾼 뒤에는 마리나라를 다시 켜야 반영됩니다.</p>
+            </div>`
+                : ""
+            }`;
+}
+
 function renderDetail() {
   const p = patchOf(state.selectedId);
   refs.detail.classList.toggle("is-open", !!p);
@@ -2750,35 +3278,33 @@ function renderDetail() {
         <div class="pmgr-detail-head">
             <div class="pmgr-detail-title">
                 <strong>${esc(p.name)}</strong>
-                <span class="pmgr-ver">${esc(p.file)}</span>
+                <span class="pmgr-ver">${esc(isRuntime(p) ? p.rt.path : p.file)}</span>
             </div>
             <button type="button" class="pmgr-icon-btn" data-act="detail-close" aria-label="상세 닫기">${icon("x", 15)}</button>
         </div>
         <div class="pmgr-detail-scroll">
-            <div class="pmgr-detail-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 14)}<div><strong>${STATUS[key].label}</strong><span>${esc(reason)}</span>
+            <div class="pmgr-detail-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 14)}<div><strong>${esc(labelOf(p))}</strong><span>${esc(reason)}</span>
                 ${t?.error ? `<span class="pmgr-err">${esc(t.error)}</span>` : ""}</div></div>
-            <div class="pmgr-detail-actions">
+            ${
+              isRuntime(p)
+                ? `<div class="pmgr-detail-actions">
+                <button type="button" class="pmgr-btn${p.include ? "" : " is-primary"}" data-act="include" data-id="${id}">${icon(p.include ? "powerOff" : "power", 13)}${p.include ? "끄기" : "켜기"}</button>
+                <button type="button" class="pmgr-btn is-danger" data-act="delete" data-id="${id}" title="관리자 목록에서만 지웁니다. 파일과 .env는 그대로입니다.">${icon("trash", 13)}${confirming ? "정말 목록에서 지우기" : "목록에서 지우기"}</button>
+            </div>`
+                : ""
+            }
+            ${
+              isRuntime(p)
+                ? ""
+                : `<div class="pmgr-detail-actions">
                 <button type="button" class="pmgr-btn ${key === "applied" ? "" : "is-primary"}" data-act="run-one" data-id="${id}">${icon("download", 13)}실행 파일</button>
                 ${p.restore ? `<button type="button" class="pmgr-btn" data-act="restore-one" data-id="${id}">${icon("undo", 13)}되돌리기 파일</button>` : ""}
                 <button type="button" class="pmgr-btn" data-act="include" data-id="${id}">${icon(p.include ? "powerOff" : "power", 13)}${p.include ? "목록에서 빼기" : "목록에 넣기"}</button>
                 <button type="button" class="pmgr-btn is-danger" data-act="delete" data-id="${id}">${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>
-            </div>
+            </div>`
+            }
             <p class="pmgr-detail-desc">${esc(p.description || "설명 없음")}</p>
-            <div class="pmgr-field">
-                <span class="pmgr-field-label">${icon("package", 12)}대상 패키지</span>
-                <label class="pmgr-flow-input">${icon("package", 14)}<input data-detail-target="${id}" list="pmgr-targets-detail" value="${esc(p.target)}" placeholder="예: gacha-forge" spellcheck="false" autocomplete="off"></label>
-                <datalist id="pmgr-targets-detail">${targetOptions()}</datalist>
-                <p class="pmgr-hint">${t ? `${esc(t.name)} ${esc(t.version)} · ${esc(t.status)}` : p.target ? (state.targets ? "설치되어 있지 않습니다." : "설치 패키지 목록을 읽지 못했습니다.") : "지정하면 적용 여부와 업데이트 후 재실행 필요를 자동으로 확인합니다."}</p>
-            </div>
-            <div class="pmgr-field">
-                <span class="pmgr-field-label">${icon("circleCheck", 12)}적용 기록</span>
-                <p class="pmgr-hint">${p.applied ? `${fmtTime(p.applied.at)} · 코드 ${esc(shortHash(p.applied.hash))}${p.applied.version ? ` · 대상 ${esc(p.applied.version)}` : ""}` : "기록 없음"}</p>
-                <div class="pmgr-gh-actions">
-                    <button type="button" class="pmgr-btn" data-act="mark-applied" data-id="${id}">${icon("check", 13)}적용됨으로 표시</button>
-                    ${p.applied ? `<button type="button" class="pmgr-btn is-ghost" data-act="mark-off" data-id="${id}">기록 지우기</button>` : ""}
-                </div>
-            </div>
-            ${sourceSectionHtml(p)}
+            ${isRuntime(p) ? runtimeFieldsHtml(p) : scriptFieldsHtml(p, id, t)}
             <div class="pmgr-field">
                 <span class="pmgr-field-label">${icon("folder", 12)}그룹</span>
                 ${
@@ -2805,13 +3331,13 @@ function renderDetail() {
             </div>
             <dl class="pmgr-info">
                 <dt>순서</dt><dd>${state.patches.indexOf(p) + 1}번째 <button type="button" class="pmgr-act" data-act="move-up" data-id="${id}" aria-label="앞으로">${icon("chevronUp", 12)}</button><button type="button" class="pmgr-act" data-act="move-down" data-id="${id}" aria-label="뒤로">${icon("chevronDown", 12)}</button></dd>
-                <dt>되돌리기</dt><dd>${p.restore ? "--restore 지원" : "지원 안 함"}</dd>
+                ${isRuntime(p) ? "" : `<dt>되돌리기</dt><dd>${p.restore ? "--restore 지원" : "지원 안 함"}</dd>`}
                 <dt>크기</dt><dd>${kb(p.size)}</dd>
                 <dt>추가일</dt><dd>${fmtDate(p.addedAt)}</dd>
                 <dt>수정일</dt><dd>${fmtDate(p.updatedAt)}</dd>
                 <dt>해시</dt><dd class="pmgr-mono" title="${esc(p.hash)}">${esc(shortHash(p.hash))}</dd>
             </dl>
-            <details class="pmgr-code" data-code="${id}"${codeOpen ? " open" : ""}><summary>코드 보기</summary>${codeOpen ? `<pre>${esc(state.scripts[p.id])}</pre>` : ""}</details>
+            ${isRuntime(p) ? "" : `<details class="pmgr-code" data-code="${id}"${codeOpen ? " open" : ""}><summary>코드 보기</summary>${codeOpen ? `<pre>${esc(state.scripts[p.id])}</pre>` : ""}</details>`}
         </div>`,
   );
   if (keepScroll) refs.detail.querySelector(".pmgr-detail-scroll").scrollTop = keepScroll;
@@ -2995,7 +3521,7 @@ function movePatch(id, delta) {
   // Move past the neighbours that are in the same view (the run list skips excluded patches).
   const inRun = state.view === "run";
   let to = from + delta;
-  while (to >= 0 && to < list.length && inRun && !list[to].include) to += delta;
+  while (to >= 0 && to < list.length && ((inRun && !list[to].include) || isRuntime(list[to]) !== isRuntime(list[from]))) to += delta;
   if (to < 0 || to >= list.length) return;
   list.splice(to, 0, ...list.splice(from, 1));
   scheduleSave();
@@ -3234,7 +3760,7 @@ function onClick(event) {
       scheduleSave();
       return render();
     case "bulk-run":
-      return void downloadRunner(state.patches.filter((x) => state.checked.has(x.id)), "apply");
+      return void downloadRunner(state.patches.filter((x) => state.checked.has(x.id) && !isRuntime(x)), "apply");
     case "bulk-clear":
       state.checked.clear();
       return renderMain();
@@ -3269,6 +3795,14 @@ function onClick(event) {
       return importLocal();
     case "import-folder":
       return importLocal(null, true);
+    case "runtime-apply":
+      return void applyRuntime();
+    case "runtime-revert":
+      for (const x of runtimeItems()) x.include = !!x.rt?.actual && x.rt.exists !== false;
+      orderRuntimeByActual();
+      state.auto = { ...(state.auto || {}), error: "" };
+      scheduleSave();
+      return render();
     case "auto-run":
       return void startAuto(runList(), state.runMode);
     case "helper-download":

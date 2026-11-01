@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 마리나라 패치 도우미 · 패치 관리자 1.3.2
+// 마리나라 패치 도우미 · 패치 관리자 1.4.0
 //
 // 마리나라를 이 도우미로 켜 두면, 패치 관리자의 [자동 적용]을 눌렀을 때 도우미가 마리나라를 잠깐 끄고,
 // 꺼진 동안 패치를 넣은 뒤 다시 켭니다. 터미널을 다시 열 필요가 없습니다(SSH로 쓰는 서버, 호스팅 서버도 같음).
@@ -14,13 +14,13 @@
 // 연결 코드를 넣은 브라우저가 보낸 작업만 실행합니다. 코드는 엔진 폴더의 .marinara-patch-helper.json에 있습니다.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, dirname, sep } from "node:path";
+import { join, resolve, dirname, sep, relative, isAbsolute, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "node:net";
 
-const VERSION = "1.3.2";
+const VERSION = "1.4.0";
 const MANAGER_NAME = "패치 관리자";
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -54,14 +54,20 @@ function readEnv(file) {
 // The server gets the environment start.bat / start.sh give it: .env loaded before Node starts (so settings
 // such as NODE_OPTIONS --require add-ons take effect), then the launchers' own defaults. Only the server gets
 // it; patch scripts run with this helper's plain environment, without those add-ons preloaded.
-const fileEnv = {};
-for (const [key, value] of Object.entries(readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")))) if (value !== "") fileEnv[key] = value;
-const env = { ...process.env, ...fileEnv };
-if (opt("--port")) env.PORT = opt("--port");
-env.NODE_ENV = "production";
-env.PORT = env.PORT || "7860";
-env.HOST = env.HOST || "0.0.0.0";
-env.SIDECAR_RUNTIME_INSTALL_ENABLED = env.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+// Read again at every start: turning a runtime patch on or off rewrites NODE_OPTIONS in .env.
+const envFile = process.env.MARINARA_ENV_FILE || join(engine, ".env");
+function launchEnv() {
+  const fileEnv = {};
+  for (const [key, value] of Object.entries(readEnv(envFile))) if (value !== "") fileEnv[key] = value;
+  const out = { ...process.env, ...fileEnv };
+  if (opt("--port")) out.PORT = opt("--port");
+  out.NODE_ENV = "production";
+  out.PORT = out.PORT || "7860";
+  out.HOST = out.HOST || "0.0.0.0";
+  out.SIDECAR_RUNTIME_INSTALL_ENABLED = out.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+  return out;
+}
+const env = launchEnv();
 const port = Number(env.PORT) || 7860;
 const dataDir = opt("--data") ? resolve(opt("--data")) : env.DATA_DIR ? resolve(serverRoot, env.DATA_DIR) : join(serverRoot, "data");
 const base = "http://127.0.0.1:" + port + "/api";
@@ -191,22 +197,212 @@ function scanData() {
   return { at: new Date().toISOString(), packages, backups };
 }
 
-/** Deletes only backup files inside capability-packages/versions, whatever the job lists. */
-function cleanBackups(paths) {
-  let removed = 0;
-  for (const rel of Array.isArray(paths) ? paths : []) {
-    if (typeof rel !== "string" || !rel.startsWith("versions/") || !BACKUP_FILE.test(rel) || rel.split("/").some((x) => !x || x === "." || x === "..")) continue;
-    const file = resolve(capDir, ...rel.split("/"));
-    if (!file.startsWith(capDir + sep)) continue;
+// ----- 설치된 패치 찾기 -----
+// Two kinds of patch live on a Marinara install:
+//   runtime patches: .cjs files loaded with NODE_OPTIONS --require (from .env); they change code in memory
+//                    as it loads and never touch files, so .env is where they are switched on, off and ordered;
+//   file patches:    scripts like patch/apply-patch.mjs that rewrite package files (found by their markers).
+// Marinara's own folders are skipped: patches/ there is pnpm's, custom_components is Home Assistant's.
+const OWN_DIRS = new Set(["node_modules", "packages", "patches", "android", "docs", "e2e", "scripts", "tools", "win", "custom_components"]);
+const PATCH_FILE = /(^|\/)(patch|patches)\/[^/]+\.(mjs|cjs|js)$|(^|\/)[^/]*patch[^/]*\.(mjs|cjs)$/i;
+const KEEP_TAGS = /^(json|js|cjs|mjs|ts|md|txt|zip|example|map|lock|yaml|yml)$/i;
+const toSlash = (p) => p.split(sep).join("/");
+const relEngine = (abs) => {
+  const r = relative(engine, abs);
+  return r && !r.startsWith("..") && !isAbsolute(r) ? toSlash(r) : null;
+};
+
+function nodeOptionsOf(value) {
+  const tokens = String(value || "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  const requires = [];
+  const other = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const m = /^(?:--require|-r)=(.*)$/.exec(t);
+    let v = m ? m[1] : null;
+    if (v === null && (t === "--require" || t === "-r") && i + 1 < tokens.length) v = tokens[++i];
+    if (v === null) other.push(t);
+    else requires.push(v.replace(/^(['"])(.*)\1$/, "$2"));
+  }
+  return { requires, other };
+}
+const requirePath = (v) => resolve(serverRoot, v);
+
+function describe(text, file) {
+  const body = text.replace(/\r\n?/g, "\n").replace(/^#!.*\n/, "").replace(/^\s*(['"])use strict\1;?[ \t]*\n/, "");
+  const block = /^\s*\/\*+([\s\S]*?)\*\//.exec(body);
+  const lines = block
+    ? block[1].split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trimEnd())
+    : (/^(?:[ \t]*\/\/.*\n?)+/.exec(body)?.[0] || "").split("\n").map((l) => l.replace(/^\s*\/\/\s?/, "").trimEnd());
+  const description = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 1500);
+  const name = basename(file).replace(/\.(cjs|mjs|js)$/i, "").replace(/[-_.]runtime$/i, "");
+  return { name, description };
+}
+
+/** Which installed packages (and versions) a patch names: "gacha-forge-1\.8\.13", "Gacha Forge 1.8.13". */
+function targetsOf(text, installed) {
+  const t = text.replace(/\\\./g, ".");
+  const escRe = (s) => s.replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+  const out = [];
+  for (const pkg of installed) {
+    const name = (pkg.manifest && pkg.manifest.name) || pkg.id;
+    const re = new RegExp("(?:" + escRe(pkg.id) + "[-@ ]|" + escRe(name).replace(/\s+/g, "\\s+") + "\\s+v?)(\\d+\\.\\d+\\.\\d+)", "gi");
+    const wants = [...new Set(Array.from(t.matchAll(re), (m) => m[1]))];
+    if (wants.length) out.push({ id: pkg.id, name, wants, installed: String(pkg.version) });
+  }
+  return out;
+}
+
+/** Settings a runtime patch reads: paths in .env it uses through process.env, and JSON next to it. */
+function configsOf(text, file, envValues) {
+  const found = new Map();
+  for (const m of text.matchAll(/process\.env\.([A-Z0-9_]+)/g)) {
+    const v = envValues[m[1]];
+    if (v && /\.(json|ya?ml|txt)$/i.test(v)) found.set(resolve(serverRoot, v), m[1]);
+  }
+  for (const m of text.matchAll(/join\(\s*__dirname\s*,\s*['"]([^'"]+\.json)['"]\s*\)/g)) found.set(join(dirname(file), m[1]), "같은 폴더");
+  // A JSON named after the patch itself (gacha-npc-portrait-runtime.cjs → gacha-npc-portrait.json).
+  const stem = basename(file).replace(/\.(cjs|mjs|js)$/i, "").replace(/[-_.]runtime$/i, "").toLowerCase();
+  for (const m of text.matchAll(/['"]([\w.-]+\.json)['"]/g)) {
+    const p = join(dirname(file), m[1]);
+    if (!found.has(p) && m[1].toLowerCase().startsWith(stem) && existsSync(p)) found.set(p, "같은 폴더");
+  }
+  // package.json and friends are how a patch finds Node modules, not settings of its own.
+  return [...found]
+    .filter(([p]) => !/^(package(-lock)?|tsconfig[\w.-]*|pnpm-[\w.-]+)\.json$/i.test(basename(p)))
+    .map(([p, via]) => ({ via, path: relEngine(p) || toSlash(p), exists: existsSync(p) }));
+}
+
+function fileSize(abs) {
+  const st = statSync(abs);
+  if (!st.isDirectory()) return st.size;
+  let total = 0;
+  for (const rel of listFiles(abs, "", [])) {
     try {
-      if (statSync(file).isFile()) {
-        rmSync(file);
-        removed += 1;
-        say("백업본을 지웠습니다: " + rel);
+      total += statSync(join(abs, rel)).size;
+    } catch {}
+  }
+  return total;
+}
+
+/** Old copies that installs left: .env.before-*, name.json.bak / .gf1812 / .before-x beside the real file, .prev/.backup-* folders. */
+function engineBackups(runtimeFiles) {
+  const out = new Map();
+  const add = (abs, group) => {
+    const rel = relEngine(abs);
+    if (!rel || out.has(rel)) return;
+    try {
+      const st = statSync(abs);
+      out.set(rel, { path: "engine/" + rel, size: fileSize(abs), modified: st.mtimeMs, scope: "engine", group, dir: st.isDirectory() });
+    } catch {}
+  };
+  for (const d of readdirSync(engine, { withFileTypes: true })) if (d.isFile() && /^\.env\./.test(d.name) && d.name !== ".env.example") add(join(engine, d.name), ".env 사본");
+  const folders = new Map();
+  for (const f of runtimeFiles) {
+    const dir = dirname(f);
+    if (dir === engine) {
+      for (const d of readdirSync(dir, { withFileTypes: true })) if (d.isFile() && d.name.startsWith(basename(f) + ".")) add(join(dir, d.name), basename(f));
+    } else if (relEngine(dir)) folders.set(dir, relEngine(dir));
+  }
+  for (const [dir, label] of folders) {
+    const names = readdirSync(dir, { withFileTypes: true });
+    const files = new Set(names.filter((d) => d.isFile()).map((d) => d.name));
+    for (const d of names) {
+      if (d.isDirectory() && (d.name === ".prev" || /^\.?backup/i.test(d.name) || /^\.old/i.test(d.name))) add(join(dir, d.name), label);
+      if (!d.isFile()) continue;
+      const cut = d.name.lastIndexOf(".");
+      const base = d.name.slice(0, cut);
+      const tag = d.name.slice(cut + 1);
+      if (BACKUP_FILE.test(d.name) || (cut > 0 && files.has(base) && !KEEP_TAGS.test(tag))) add(join(dir, d.name), label);
+    }
+  }
+  return [...out.values()];
+}
+
+function findScripts(skip) {
+  const out = [];
+  const walk = (dir, rel, depth) => {
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {}
+    for (const d of entries) {
+      const abs = join(dir, d.name);
+      if (d.isDirectory()) {
+        if (depth < 4 && !d.name.startsWith(".") && d.name !== "node_modules" && !(depth === 0 && OWN_DIRS.has(d.name))) walk(abs, rel + d.name + "/", depth + 1);
+      } else if (d.isFile() && depth > 0 && PATCH_FILE.test(rel + d.name) && !skip.has(abs) && out.length < 30) {
+        const st = statSync(abs);
+        if (st.size <= 2 * 1024 * 1024) out.push({ path: rel + d.name, size: st.size, code: readFileSync(abs, "utf8") });
       }
+    }
+  };
+  walk(engine, "", 0);
+  return out;
+}
+
+function discover() {
+  const scan = scanData();
+  const registry = JSON.parse(readFileSync(join(capDir, "installed.json"), "utf8"));
+  const installed = (Array.isArray(registry.packages) ? registry.packages : []).filter((x) => x && typeof x.id === "string");
+  const envValues = readEnv(envFile);
+  const opts = nodeOptionsOf(envValues.NODE_OPTIONS);
+  const runtime = opts.requires.map((value, order) => {
+    const abs = requirePath(value);
+    const rel = relEngine(abs);
+    const item = { value, path: rel || toSlash(abs), inEngine: !!rel, order, exists: existsSync(abs) };
+    if (!item.exists) return item;
+    const text = readFileSync(abs, "utf8");
+    return { ...item, size: statSync(abs).size, sha256: sha256(text), ...describe(text, abs), targets: targetsOf(text, installed), configs: configsOf(text, abs, envValues) };
+  });
+  const runtimeFiles = runtime.filter((r) => r.exists).map((r) => requirePath(r.value));
+  for (const b of scan.backups) b.scope = "package";
+  return {
+    ...scan,
+    backups: [...scan.backups, ...engineBackups(runtimeFiles)],
+    runtime,
+    nodeOptionsOther: opts.other,
+    scripts: findScripts(new Set(runtimeFiles)),
+  };
+}
+
+/** Deletes only what a fresh look still lists as a backup, whatever the job names. */
+function cleanBackups(paths) {
+  const allowed = new Map(discover().backups.map((b) => [b.path, b]));
+  let removed = 0;
+  for (const p of Array.isArray(paths) ? paths : []) {
+    const b = allowed.get(p);
+    if (!b) continue;
+    const abs = b.scope === "engine" ? resolve(engine, ...p.slice("engine/".length).split("/")) : resolve(capDir, ...p.split("/"));
+    if (!relEngine(abs) && !abs.startsWith(capDir + sep)) continue;
+    try {
+      rmSync(abs, { recursive: !!b.dir, force: true });
+      removed += 1;
+      say("백업본을 지웠습니다: " + p);
     } catch {}
   }
   return removed;
+}
+
+/** NODE_OPTIONS with the engine's runtime patches set to the list given, everything else kept as it was. */
+function nextNodeOptions(rels) {
+  const current = nodeOptionsOf(readEnv(envFile).NODE_OPTIONS);
+  const outside = current.requires.filter((v) => !relEngine(requirePath(v)));
+  const quote = (p) => (/\s/.test(p) ? '"' + p + '"' : p);
+  const keep = [...current.other, ...outside.map((v) => "--require=" + quote(v))];
+  const wanted = rels.map((rel) => "--require=" + quote(toSlash(resolve(engine, ...rel.split("/")))));
+  return [...keep, ...wanted].join(" ");
+}
+
+function writeNodeOptions(value) {
+  const text = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+  writeFileSync(envFile + ".patch-manager-backup", text);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^\s*(?:export\s+)?NODE_OPTIONS\s*=/.test(l));
+  const line = "NODE_OPTIONS=" + value;
+  if (at >= 0) lines[at] = line;
+  else lines.splice(lines[lines.length - 1] === "" ? lines.length - 1 : lines.length, 0, line);
+  writeFileSync(envFile, lines.join(eol));
 }
 
 function signed(job, payload) {
@@ -319,14 +515,44 @@ async function watch() {
       else {
         try {
           const removed = job.kind === "clean" ? cleanBackups(paths) : 0;
-          fields = { error: null, scan: { ...scanData(), jobId: job.id, removed } };
-          if (job.kind === "scan") say("data 폴더를 검사했습니다.");
+          fields = { error: null, scan: { ...discover(), jobId: job.id, removed } };
+          if (job.kind === "scan") say("설치된 패치를 찾았습니다.");
         } catch (e) {
           fields = { error: "검사하지 못했습니다: " + e.message };
         }
       }
       if (fields.error) say("작업을 처리하지 못했습니다: " + fields.error);
       await report({ seenJob: job.id, doneJob: job.id, ...fields }).catch(() => {});
+      continue;
+    }
+    if (job.kind === "runtime") {
+      config.done = [...config.done, job.id].slice(-50);
+      saveConfig();
+      const rels = Array.isArray(job.requires) ? job.requires.map(String) : [];
+      let problem = "";
+      if (!(Date.now() - Date.parse(job.at) < 15 * 60 * 1000)) problem = "15분이 넘은 작업이라 실행하지 않았습니다.";
+      else if (!signed(job, rels.join(","))) problem = "연결 코드가 맞지 않는 작업이라 실행하지 않았습니다. 패치 관리자에 연결 코드를 다시 넣어 주세요.";
+      else {
+        for (const rel of rels) {
+          const abs = resolve(engine, ...rel.split("/"));
+          if (rel.split("/").some((x) => !x || x === "." || x === "..") || !relEngine(abs) || !/\.(c?js|mjs)$/i.test(rel) || !existsSync(abs)) problem = "켤 수 없는 파일입니다: " + rel;
+        }
+      }
+      if (problem) {
+        say("작업을 거절했습니다: " + problem);
+        await report({ seenJob: job.id, doneJob: job.id, error: problem }).catch(() => {});
+        continue;
+      }
+      say("런타임 패치 설정을 받았습니다 (켜짐 " + rels.length + "개). 마리나라를 재시작합니다.");
+      pending = { job, nodeOptions: nextNodeOptions(rels) };
+      try {
+        await report({ seenJob: job.id, error: null });
+        await api("/admin/restart", "POST", { confirm: true });
+      } catch (e) {
+        pending = null;
+        say("재시작하지 못했습니다: " + e.message);
+        await report({ doneJob: job.id, error: "재시작하지 못했습니다: " + e.message }).catch(() => {});
+      }
       continue;
     }
     const list = verify(job, value);
@@ -361,6 +587,27 @@ async function rebuildIfNeeded() {
   if (!changed) return true;
   say("빌드한 뒤 바뀐 서버 파일이 있어 다시 빌드합니다: dist/" + changed);
   return (await exited(spawn(process.execPath, [join(serverRoot, "scripts", "build.mjs")], { cwd: serverRoot, stdio: "inherit" }))) === 0;
+}
+
+// Look only: what the manager would see, without starting Marinara.
+if (args.includes("--discover")) {
+  const d = discover();
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(d));
+    process.exit(0);
+  }
+  console.log("런타임 패치 (NODE_OPTIONS 순서):");
+  for (const r of d.runtime) {
+    const t = (r.targets || []).map((x) => x.name + " " + x.wants.join("/") + (x.wants.includes(x.installed) ? "" : " ≠ 설치 " + x.installed)).join(", ");
+    console.log("  " + (r.order + 1) + ". " + (r.name || r.path) + (r.exists ? "" : " [파일 없음]") + "  " + r.path + (t ? "  · 대상 " + t : "") + ((r.configs || []).length ? "  · 설정 " + r.configs.map((c) => c.path).join(", ") : ""));
+  }
+  console.log("파일 패치 스크립트:");
+  for (const s of d.scripts) console.log("  " + s.path);
+  console.log("패키지 속 패치 표식:");
+  for (const p of d.packages.filter((x) => x.markers.length)) console.log("  " + p.id + " " + p.version + ": " + p.markers.join(", "));
+  console.log("백업본:");
+  for (const b of d.backups) console.log("  " + b.path + (b.dir ? "/" : "") + "  (" + Math.round(b.size / 1024) + "KB)");
+  process.exit(0);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -404,7 +651,7 @@ for (;;) {
   child = spawn(process.execPath, ["dist/index.js"], {
     cwd: serverRoot,
     stdio: "inherit",
-    env: { ...env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
+    env: { ...launchEnv(), MARINARA_RESTART_SUPERVISOR: String(process.pid) },
   });
   const code = await exited(child);
   child = null;
@@ -413,7 +660,18 @@ for (;;) {
     process.exitCode = stopping ? 0 : code;
     break;
   }
-  if (pending) {
+  if (pending && pending.nodeOptions !== undefined) {
+    // Runtime patches: .env is read at the next start, so this is the whole change.
+    const job = pending.job;
+    try {
+      writeNodeOptions(pending.nodeOptions);
+      say("NODE_OPTIONS를 바꿨습니다 (이전 .env는 .env.patch-manager-backup). 마리나라를 다시 켭니다.");
+      unsent = { doneJob: job.id, error: null, result: { ok: true, at: new Date().toISOString(), mode: "runtime", items: [], log: "NODE_OPTIONS=" + pending.nodeOptions }, scan: { ...discover(), jobId: job.id } };
+    } catch (e) {
+      unsent = { doneJob: job.id, error: "NODE_OPTIONS를 바꾸지 못했습니다: " + e.message };
+    }
+    pending = null;
+  } else if (pending) {
     const job = pending;
     try {
       await runJob(job);
