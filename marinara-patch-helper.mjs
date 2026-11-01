@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 마리나라 패치 도우미 · 패치 관리자 1.4.1
+// 마리나라 패치 도우미 · 패치 관리자 1.5.0
 //
 // 마리나라를 이 도우미로 켜 두면, 패치 관리자의 [자동 적용]을 눌렀을 때 도우미가 마리나라를 잠깐 끄고,
 // 꺼진 동안 패치를 넣은 뒤 다시 켭니다. 터미널을 다시 열 필요가 없습니다(SSH로 쓰는 서버, 호스팅 서버도 같음).
@@ -20,7 +20,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "node:net";
 
-const VERSION = "1.4.1";
+const VERSION = "1.5.0";
 const MANAGER_NAME = "패치 관리자";
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -135,7 +135,7 @@ async function report(fields) {
   }
   throw new Error("패치 관리자에 답을 저장하지 못했습니다.");
 }
-const ATTACHED_ONLY = "이 마리나라는 도우미가 켠 것이 아니라서(런처·서비스 등으로 켬) 도우미가 재시작하며 패치할 수 없습니다. 설치된 패치 찾기와 백업본 정리는 됩니다. 자동 적용을 쓰려면 마리나라를 끄고 'node marinara-patch-helper.mjs'로 켜 주세요. 런타임 패치만 바꾸는 거라면 화면의 NODE_OPTIONS 줄을 .env에 넣고 평소처럼 다시 켜도 됩니다.";
+const ATTACHED_ONLY = "이 마리나라는 도우미가 켠 것이 아니라서(런처·서비스 등으로 켬) 파일 패치를 넣을 수 없습니다. 파일 패치는 마리나라가 꺼진 동안 들어가야 하는데, 도우미가 켠 마리나라만 도우미가 껐다 켤 수 있습니다. 마리나라를 끄고 'node marinara-patch-helper.mjs'로 켠 뒤 다시 눌러 주세요.";
 
 const safeFile = (name) => String(name || "patch.mjs").replace(/[^\w.-]+/g, "-").replace(/^[-.]+/, "") || "patch.mjs";
 
@@ -550,7 +550,19 @@ async function watch() {
           if (rel.split("/").some((x) => !x || x === "." || x === "..") || !relEngine(abs) || !/\.(c?js|mjs)$/i.test(rel) || !existsSync(abs)) problem = "켤 수 없는 파일입니다: " + rel;
         }
       }
-      if (!problem && attached) problem = ATTACHED_ONLY;
+      if (!problem && attached) {
+        // Not our Marinara to restart: .env is written now (Marinara reloads .env itself, and NODE_OPTIONS
+        // is read only at start), so the change lands the next time it is closed and started again.
+        try {
+          const value = nextNodeOptions(rels);
+          writeNodeOptions(value);
+          say("NODE_OPTIONS를 바꿨습니다 (켜짐 " + rels.length + "개). 마리나라를 완전히 껐다 켜면 반영됩니다.");
+          await report({ seenJob: job.id, doneJob: job.id, error: null, result: { ok: true, at: new Date().toISOString(), mode: "runtime", nextStart: true, items: [], log: "NODE_OPTIONS=" + value }, scan: { ...discover(), jobId: job.id } }).catch(() => {});
+        } catch (e) {
+          await report({ seenJob: job.id, doneJob: job.id, error: "NODE_OPTIONS를 바꾸지 못했습니다: " + e.message }).catch(() => {});
+        }
+        continue;
+      }
       if (problem) {
         say("작업을 거절했습니다: " + problem);
         await report({ seenJob: job.id, doneJob: job.id, error: problem }).catch(() => {});
@@ -653,8 +665,8 @@ say("연결 코드: " + pairingCode + "  ← 패치 관리자 → 실행 → 자
 if (portBusy) {
   attached = true;
   say("마리나라가 이미 켜져 있어(포트 " + port + ") 옆에 붙어서 돕니다. 이 창은 켜 둔 채로 두세요(끝내려면 Ctrl+C).");
-  say("  지금 되는 것: 설치된 패치 찾기, 백업본 정리.");
-  say("  재시작이 필요한 것(자동 적용, 런타임 패치 켜기·끄기)은 마리나라를 끄고 이 도우미로 켜야 합니다.");
+  say("  지금 되는 것: 설치된 패치 찾기, 백업본 정리, 런타임 패치 켜기·끄기·설치(다음에 껐다 켤 때 반영).");
+  say("  안 되는 것: 파일 패치 자동 적용(마리나라를 끄고 이 도우미로 켜야 함).");
   await watch();
   process.exit(0);
 }

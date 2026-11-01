@@ -3,7 +3,7 @@
   "version": 1,
   "config": {
     "name": "패치 관리자",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "description": "패치 관리자: 마리나라의 두 가지 패치를 함께 관리합니다. .env의 NODE_OPTIONS(--require)로 불러오는 런타임 패치(.cjs)는 켜기·끄기·불러오는 순서·버전 확인을, 패키지 파일을 고치는 파일 패치(patch/apply-patch.mjs 같은)는 적용·되돌리기·업데이트 확인을 합니다. 서버에 도우미(marinara-patch-helper.mjs)를 한 번 깔면 이미 깔린 패치를 찾아 자동으로 반영하고, 재시작 한 번으로 적용하며(SSH·호스팅 서버도 같음), 남은 백업본을 정리합니다.",
     "runtime": "client",
     "enabled": false,

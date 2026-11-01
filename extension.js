@@ -6,7 +6,7 @@
 // 사용자가 node로 실행합니다. 마리나라를 다시 켜면 설치 기록(/api/capability-packages/installed)의 파일 해시를
 // 실행 전과 비교해 적용 여부를 알아내고, 대상 패키지가 업데이트되면 "다시 실행 필요"로 표시합니다.
 
-const PM_VERSION = "1.4.1";
+const PM_VERSION = "1.5.0";
 const GH_LIMIT = 8 * 1024 * 1024;
 const SCRIPT_LIMIT = 2 * 1024 * 1024;
 let stopped = false;
@@ -102,6 +102,9 @@ const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
 // Patch scripts: anything under a patch/ or patches/ folder, or a .mjs/.cjs whose name says "patch".
 const PATCH_FILE = /(^|\/)(patch|patches)\/[^/]+\.(mjs|cjs|js)$|(^|\/)[^/]*patch[^/]*\.(mjs|cjs)$/i;
 
+// Runtime patches: files loaded with NODE_OPTIONS --require (gf-featured-runtime.cjs, server/*.cjs).
+const RUNTIME_FILE = /(^|\/)[^/]*runtime[^/]*\.c?js$|(^|\/)server\/[^/]+\.cjs$/i;
+
 async function discoverRepo(input) {
   const { repo, ref, path, kind } = parseGitHubInput(input);
   const info = await ghFetch(`https://api.github.com/repos/${repo}`);
@@ -118,10 +121,15 @@ async function discoverRepo(input) {
     choices = [hit];
   } else {
     const inside = path ? blobs.filter((x) => x.path.startsWith(path + "/")) : blobs;
-    choices = inside.filter((x) => PATCH_FILE.test(x.path));
+    choices = inside.filter((x) => PATCH_FILE.test(x.path) || RUNTIME_FILE.test(x.path));
   }
-  choices = choices.filter((x) => x.size <= SCRIPT_LIMIT).map((x) => ({ path: x.path, size: x.size, label: `${x.path} · ${kb(x.size)}` }));
-  if (!choices.length) throw new Error("패치 스크립트를 찾지 못했습니다. patch/ 폴더의 .mjs, 또는 이름에 patch가 들어간 .mjs를 찾습니다. 파일 주소를 직접 넣어도 됩니다.");
+  choices = choices
+    .filter((x) => x.size <= SCRIPT_LIMIT)
+    .map((x) => {
+      const runtime = !PATCH_FILE.test(x.path) && (RUNTIME_FILE.test(x.path) || /\.cjs$/i.test(x.path));
+      return { path: x.path, size: x.size, kind: runtime ? "runtime" : "script", label: `${runtime ? "런타임 패치 · " : ""}${x.path} · ${kb(x.size)}` };
+    });
+  if (!choices.length) throw new Error("패치를 찾지 못했습니다. patch/ 폴더의 스크립트, 이름에 patch나 runtime이 들어간 파일, server/ 폴더의 .cjs를 찾습니다. 파일 주소를 직접 넣어도 됩니다.");
   // apply-patch.* first: that is what most repos call the entry point.
   choices.sort((a, b) => /apply-patch/i.test(b.path) - /apply-patch/i.test(a.path) || a.path.localeCompare(b.path));
   return { repo, branch: ref || null, sha: commit.sha, choices };
@@ -632,7 +640,7 @@ const state = {
   patches: [],
   scripts: {},
   groups: [],
-  prefs: { view: "grid", sort: "order", grouped: true, dataDir: "", portCheck: true },
+  prefs: { view: "grid", sort: "order", grouped: true, dataDir: "", portCheck: true, syncedScanAt: "", restartOwed: "" },
   lastRun: null,
   targets: null,
   targetsError: null,
@@ -831,6 +839,16 @@ function reload() {
       } catch (err) {
         state.targets = null;
         state.targetsError = err instanceof Error ? err.message : String(err);
+      }
+      // The helper's latest look at the server is taken as soon as the manager opens: what is installed
+      // shows up without pressing anything, including a scan answered while the page was closed.
+      const latest = state.helper?.scan;
+      if (isObj(latest) && Array.isArray(latest.runtime) && latest.at && latest.at !== state.prefs.syncedScanAt) {
+        await useDiscovery(latest);
+        state.prefs.syncedScanAt = latest.at;
+        const r = state.scanResult;
+        const added = (r?.runtimeAdded?.length || 0) + (r?.scriptsAdded?.length || 0);
+        if (added) notice(`도우미가 찾은 설치된 패치 ${added}개를 목록에 넣었습니다.`);
       }
       reconcileRun();
       for (const id of [...state.checked]) if (!patchOf(id)) state.checked.delete(id);
@@ -1337,7 +1355,7 @@ async function report(fields) {
   }
   throw new Error("패치 관리자에 답을 저장하지 못했습니다.");
 }
-const ATTACHED_ONLY = "이 마리나라는 도우미가 켠 것이 아니라서(런처·서비스 등으로 켬) 도우미가 재시작하며 패치할 수 없습니다. 설치된 패치 찾기와 백업본 정리는 됩니다. 자동 적용을 쓰려면 마리나라를 끄고 'node marinara-patch-helper.mjs'로 켜 주세요. 런타임 패치만 바꾸는 거라면 화면의 NODE_OPTIONS 줄을 .env에 넣고 평소처럼 다시 켜도 됩니다.";
+const ATTACHED_ONLY = "이 마리나라는 도우미가 켠 것이 아니라서(런처·서비스 등으로 켬) 파일 패치를 넣을 수 없습니다. 파일 패치는 마리나라가 꺼진 동안 들어가야 하는데, 도우미가 켠 마리나라만 도우미가 껐다 켤 수 있습니다. 마리나라를 끄고 'node marinara-patch-helper.mjs'로 켠 뒤 다시 눌러 주세요.";
 
 const safeFile = (name) => String(name || "patch.mjs").replace(/[^\w.-]+/g, "-").replace(/^[-.]+/, "") || "patch.mjs";
 
@@ -1752,7 +1770,19 @@ async function watch() {
           if (rel.split("/").some((x) => !x || x === "." || x === "..") || !relEngine(abs) || !/\.(c?js|mjs)$/i.test(rel) || !existsSync(abs)) problem = "켤 수 없는 파일입니다: " + rel;
         }
       }
-      if (!problem && attached) problem = ATTACHED_ONLY;
+      if (!problem && attached) {
+        // Not our Marinara to restart: .env is written now (Marinara reloads .env itself, and NODE_OPTIONS
+        // is read only at start), so the change lands the next time it is closed and started again.
+        try {
+          const value = nextNodeOptions(rels);
+          writeNodeOptions(value);
+          say("NODE_OPTIONS를 바꿨습니다 (켜짐 " + rels.length + "개). 마리나라를 완전히 껐다 켜면 반영됩니다.");
+          await report({ seenJob: job.id, doneJob: job.id, error: null, result: { ok: true, at: new Date().toISOString(), mode: "runtime", nextStart: true, items: [], log: "NODE_OPTIONS=" + value }, scan: { ...discover(), jobId: job.id } }).catch(() => {});
+        } catch (e) {
+          await report({ seenJob: job.id, doneJob: job.id, error: "NODE_OPTIONS를 바꾸지 못했습니다: " + e.message }).catch(() => {});
+        }
+        continue;
+      }
       if (problem) {
         say("작업을 거절했습니다: " + problem);
         await report({ seenJob: job.id, doneJob: job.id, error: problem }).catch(() => {});
@@ -1855,8 +1885,8 @@ say("연결 코드: " + pairingCode + "  ← 패치 관리자 → 실행 → 자
 if (portBusy) {
   attached = true;
   say("마리나라가 이미 켜져 있어(포트 " + port + ") 옆에 붙어서 돕니다. 이 창은 켜 둔 채로 두세요(끝내려면 Ctrl+C).");
-  say("  지금 되는 것: 설치된 패치 찾기, 백업본 정리.");
-  say("  재시작이 필요한 것(자동 적용, 런타임 패치 켜기·끄기)은 마리나라를 끄고 이 도우미로 켜야 합니다.");
+  say("  지금 되는 것: 설치된 패치 찾기, 백업본 정리, 런타임 패치 켜기·끄기·설치(다음에 껐다 켤 때 반영).");
+  say("  안 되는 것: 파일 패치 자동 적용(마리나라를 끄고 이 도우미로 켜야 함).");
   await watch();
   process.exit(0);
 }
@@ -2049,7 +2079,11 @@ async function applyRuntime() {
     if (state.helper.error) throw new Error(state.helper.error);
     if (isObj(state.helper.scan)) await useDiscovery(state.helper.scan);
     state.auto = { busy: "", jobId: job.id, error: "" };
-    notice("런타임 패치 설정을 적용했습니다.");
+    if (state.helper.result?.nextStart) {
+      state.prefs.restartOwed = new Date().toISOString();
+      scheduleSave();
+      notice(".env에 저장했습니다. 마리나라를 완전히 껐다 켜면 반영됩니다.");
+    } else notice("런타임 패치 설정을 적용했습니다.");
   } catch (err) {
     state.auto = { ...state.auto, busy: "", error: err instanceof Error ? err.message : String(err) };
   }
@@ -2509,19 +2543,29 @@ function orderRuntimeByActual() {
   slots.forEach((slot, i) => (state.patches[slot] = ordered[i]));
 }
 
+function restartOwedBanner() {
+  if (!state.prefs.restartOwed) return "";
+  return `<div class="pmgr-banner">
+        ${icon("refresh", 14)}
+        <div class="pmgr-banner-text"><strong>마리나라를 껐다 켜야 반영됩니다</strong>
+        <span>${fmtTime(state.prefs.restartOwed)}에 .env의 NODE_OPTIONS를 바꿨습니다. 런처 창을 닫고 다시 열어 주십시오. 설정의 "서버 재시작"은 NODE_OPTIONS를 다시 읽지 않아 반영되지 않습니다.</span></div>
+        <div class="pmgr-banner-actions"><button type="button" class="pmgr-btn" data-act="restart-done">${icon("check", 13)}다시 켰음</button></div>
+    </div>`;
+}
+
 function runtimeBanner() {
-  if (!runtimeChanged()) return "";
+  if (!runtimeChanged()) return restartOwedBanner();
   const busy = state.auto?.busy;
   const line = runtimeLine();
   const code = helperCode();
   return `<div class="pmgr-banner">
         ${icon("clock", 14)}
         <div class="pmgr-banner-text"><strong>런타임 패치 변경 ${runtimePending().size}건 · 아직 반영 안 됨</strong>
-        <span>마리나라는 NODE_OPTIONS를 켤 때만 읽으므로 재시작해야 반영됩니다. ${code ? "[재시작해서 적용]을 누르면 도우미가 .env를 바꾸고 마리나라를 다시 켭니다." : "도우미가 없으면 .env의 NODE_OPTIONS 줄을 아래로 바꾸고 마리나라를 다시 켜 주십시오."}</span>
+        <span>마리나라는 NODE_OPTIONS를 켤 때만 읽으므로 재시작해야 반영됩니다. ${code ? (state.helper?.supervisor === false ? "[적용]을 누르면 도우미가 .env를 바꿉니다. 마리나라를 완전히 껐다 켜면 반영됩니다." : "[적용]을 누르면 도우미가 .env를 바꾸고 마리나라를 다시 켭니다.") : "도우미가 없으면 .env의 NODE_OPTIONS 줄을 아래로 바꾸고 마리나라를 다시 켜 주십시오."}</span>
         <div class="pmgr-cmd"><code>${esc(line)}</code><button type="button" class="pmgr-icon-btn" data-act="copy" data-v="${esc(line)}" title="복사" aria-label="NODE_OPTIONS 줄 복사">${icon("copy", 13)}</button></div>
         ${state.auto?.error ? `<span class="pmgr-err">${esc(state.auto.error)}</span>` : ""}</div>
         <div class="pmgr-banner-actions">
-            <button type="button" class="pmgr-btn is-primary" data-act="runtime-apply"${busy || !code ? " disabled" : ""}>${icon(busy ? "loader" : "refresh", 13)}${busy ? esc(busy) : "재시작해서 적용"}</button>
+            <button type="button" class="pmgr-btn is-primary" data-act="runtime-apply"${busy || !code ? " disabled" : ""}>${icon(busy ? "loader" : "refresh", 13)}${busy ? esc(busy) : state.helper?.supervisor === false ? "적용 (.env)" : "재시작해서 적용"}</button>
             <button type="button" class="pmgr-btn is-ghost" data-act="runtime-revert"${busy ? " disabled" : ""}>바꾼 것 취소</button>
         </div>
     </div>`;
@@ -2635,7 +2679,28 @@ function targetOptions() {
   return state.targets ? [...state.targets.values()].map((t) => `<option value="${esc(t.id)}">${esc(t.name)} ${esc(t.version)}</option>`).join("") : "";
 }
 
+/** A runtime patch from GitHub: link it to the one already installed (for update checks). */
+function runtimeMatch(pkg) {
+  const name = pkg.file.toLowerCase();
+  return runtimeItems().find((x) => x.hash === pkg.hash) || runtimeItems().find((x) => x.rt?.path.split("/").pop().toLowerCase() === name) || null;
+}
+function runtimePreviewHtml(flow) {
+  const pkg = flow.pkg;
+  const m = runtimeMatch(pkg);
+  const src = pkg.source;
+  const head = `<div class="pmgr-flow-title"><strong>${esc(pkg.file)}</strong><span class="pmgr-ver">런타임 패치</span></div>
+        <div class="pmgr-flow-meta">${icon("github", 13)}<span>${esc(src.repo)}</span><span class="pmgr-mono">${esc(src.path)} @ ${esc(src.ref.slice(0, 10))}</span></div>
+        ${pkg.info.description ? `<p class="pmgr-flow-desc">${esc(pkg.info.description)}</p>` : ""}`;
+  const body = m
+    ? `<div class="pmgr-flow-note is-ok">이미 설치된 런타임 패치입니다: ${esc(m.rt.path)} · ${m.hash === pkg.hash ? "코드가 같습니다" : "코드가 다릅니다(연결하면 업데이트 있음으로 표시)"}</div>
+       <div class="pmgr-flow-actions"><button type="button" class="pmgr-btn is-primary" data-act="flow-rt-link" data-id="${esc(m.id)}">${icon("link", 13)}이 GitHub 파일과 연결</button><button type="button" class="pmgr-btn is-ghost" data-act="flow-cancel">취소</button></div>`
+    : `<div class="pmgr-flow-note is-hint">아직 설치되지 않은 런타임 패치입니다. 지금은 관리자에서 바로 설치할 수 없습니다: 파일을 마리나라 엔진 폴더에 넣고 .env의 NODE_OPTIONS에 --require=그 파일 경로를 더한 뒤, [검사] → 설치된 패치 찾기를 누르면 목록에 들어옵니다. 그다음 이 화면에서 GitHub과 연결할 수 있습니다.</div>
+       <div class="pmgr-flow-actions"><button type="button" class="pmgr-btn is-ghost" data-act="flow-cancel">닫기</button></div>`;
+  return `${head}${body}<details class="pmgr-code" data-code="flow"><summary>코드 보기 · ${esc(pkg.file)}</summary><pre>${esc(pkg.text)}</pre></details>`;
+}
+
 function previewHtml(flow, p) {
+  if (flow.pkg?.runtime && !flow.target) return runtimePreviewHtml(flow);
   const pkg = flow.pkg;
   const info = pkg.info;
   const dis = flow.busy ? " disabled" : "";
@@ -3438,6 +3503,7 @@ function loadChoice() {
     const choice = snap.choices[flow.choiceIndex];
     const text = await fetchRepoFile(snap.repo, choice.path, snap.sha);
     flow.pkg = await makePkg(text, `${snap.repo.split("/")[1]}/${choice.path}`, { kind: "github", repo: snap.repo, path: choice.path, branch: snap.branch, ref: snap.sha });
+    flow.pkg.runtime = choice.kind === "runtime";
     flow.step = "preview";
   });
 }
@@ -3813,6 +3879,10 @@ function onClick(event) {
       return importLocal();
     case "import-folder":
       return importLocal(null, true);
+    case "restart-done":
+      state.prefs.restartOwed = "";
+      scheduleSave();
+      return render();
     case "runtime-apply":
       return void applyRuntime();
     case "runtime-revert":
@@ -3901,6 +3971,22 @@ function onClick(event) {
       return;
     case "flow-load":
       return loadChoice();
+    case "flow-rt-link": {
+      const flow = state.flow;
+      const x = patchOf(id);
+      if (!flow?.pkg || !x) return;
+      x.source = sourceFrom(flow.pkg);
+      if (flow.pkg.hash !== x.hash) {
+        state.updates.set(x.id, flow.pkg);
+        x.source.message = "GitHub과 코드가 다름 · 연결됨";
+      } else x.source.message = "최신 상태 · 연결됨";
+      state.flow = null;
+      state.view = "list";
+      state.selectedId = x.id;
+      scheduleSave();
+      render();
+      return notice("설치된 런타임 패치를 GitHub 파일과 연결했습니다. 이제 업데이트 확인이 됩니다.");
+    }
     case "flow-link": {
       const flow = state.flow;
       const x = flow && patchOf(flow.target);
