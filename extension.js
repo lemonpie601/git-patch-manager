@@ -6,7 +6,7 @@
 // 사용자가 node로 실행합니다. 마리나라를 다시 켜면 설치 기록(/api/capability-packages/installed)의 파일 해시를
 // 실행 전과 비교해 적용 여부를 알아내고, 대상 패키지가 업데이트되면 "다시 실행 필요"로 표시합니다.
 
-const PM_VERSION = "1.3.1";
+const PM_VERSION = "1.3.2";
 const GH_LIMIT = 8 * 1024 * 1024;
 const SCRIPT_LIMIT = 2 * 1024 * 1024;
 let stopped = false;
@@ -403,8 +403,10 @@ function inputSource(files) {
   };
 }
 
-function pickDataFolder() {
-  if (typeof window.showDirectoryPicker === "function") {
+// Chrome will not hand a page folders it counts as system locations (AppData and the like) through the
+// folder API; the plain folder input still reads them, so that is the fallback (read only).
+function pickDataFolder(plain = false) {
+  if (!plain && typeof window.showDirectoryPicker === "function") {
     return window.showDirectoryPicker({ id: "marinara-data", mode: "read" }).then(handleSource, (err) => {
       if (err?.name === "AbortError") return null;
       throw err;
@@ -1158,6 +1160,7 @@ main().catch((e) => {
 // still cannot make the server run code.
 const HELPER_NAME = "marinara-patch-helper.mjs";
 const HELPER_KEY = "pm-helper-code";
+const HELPER_SILENT = "도우미가 응답하지 않습니다. 지금 마리나라를 런처(start.bat, MarinaraLauncher)로 켰다면 도우미가 없는 상태입니다. 마리나라를 끄고, 엔진 폴더에서 node marinara-patch-helper.mjs로 다시 켠 뒤 해 주십시오. 도우미 창에 \"패치 관리자와 연결했습니다\"가 떠 있어야 합니다.";
 const HELPER = String.raw`#!/usr/bin/env node
 // 마리나라 패치 도우미 · 패치 관리자 __PM_VERSION__
 //
@@ -1434,6 +1437,13 @@ let stopping = false;
 
 async function watch() {
   let seen = null;
+  // Say once how the link to the manager stands, so a silent helper can be told apart from a missing one.
+  let link = "";
+  const linkState = (state, text) => {
+    if (state !== link) say(text);
+    link = state;
+  };
+  const startedAt = Date.now();
   for (;;) {
     await sleep(3000);
     if (stopping) return;
@@ -1441,10 +1451,16 @@ async function watch() {
     let value;
     try {
       value = await readStorage();
-    } catch {
+    } catch (e) {
+      // The server takes a while to come up; only complain once it should have.
+      if (Date.now() - startedAt > 60000) linkState("error:" + e.message, "패치 관리자에 연결하지 못했습니다: " + e.message);
       continue;
     }
-    if (!value) continue;
+    if (!value) {
+      linkState("missing", "\"" + MANAGER_NAME + "\" 확장을 찾지 못했습니다. 외부 확장에서 켜져(승인되어) 있는지 확인해 주세요. 찾으면 바로 연결합니다.");
+      continue;
+    }
+    linkState("ok", "패치 관리자와 연결했습니다. 이제 [자동 적용] · [서버에서 검사]를 쓸 수 있습니다.");
     try {
       if (unsent) {
         await report(unsent);
@@ -1625,7 +1641,7 @@ async function helperTask(kind, paths = []) {
   const job = { id: newId("j"), kind, at: new Date().toISOString(), paths };
   job.mac = hmacHex(key, [job.id, kind, job.at, paths.join(",")].join("|"));
   await marinara.storage.patch({ helperJob: job });
-  const helper = await waitHelper((h) => h.doneJob === job.id, 30e3, "도우미가 응답하지 않습니다. 서버에서 마리나라를 도우미(node marinara-patch-helper.mjs)로 켰는지 확인해 주십시오.");
+  const helper = await waitHelper((h) => h.doneJob === job.id, 30e3, HELPER_SILENT);
   if (helper.error) throw new Error(helper.error);
   if (!isObj(helper.scan) || helper.scan.jobId !== job.id) throw new Error("도우미가 검사 결과를 보내지 않았습니다.");
   return helper.scan;
@@ -1656,7 +1672,7 @@ async function startAuto(list, mode) {
     await marinara.storage.patch({ helperJob: job });
     step("도우미가 받기를 기다리는 중…");
     const until = waitHelper;
-    const got = await until((h) => h.seenJob === job.id || h.doneJob === job.id, 20e3, "도우미가 응답하지 않습니다. 마리나라를 도우미로 켰는지 확인해 주십시오.");
+    const got = await until((h) => h.seenJob === job.id || h.doneJob === job.id, 20e3, HELPER_SILENT);
     if (got.doneJob !== job.id) {
       step("마리나라를 재시작하고 패치하는 중… (잠깐 연결이 끊깁니다)");
       await until((h) => h.doneJob === job.id, 5 * 60e3, "5분 안에 끝나지 않았습니다. 도우미가 돌아가는 터미널을 확인해 주십시오.");
@@ -2456,7 +2472,9 @@ function scanViewHtml() {
             <div class="pmgr-flow-actions">
                 <button type="button" class="pmgr-btn${remote ? " is-primary" : ""}" data-act="scan-helper"${busy || !helperCode() ? " disabled" : ""}>${icon(busy ? "loader" : "terminal", 13)}서버에서 검사 (도우미)</button>
                 <button type="button" class="pmgr-btn${remote ? "" : " is-primary"}" data-act="scan-pick"${busy ? " disabled" : ""}>${icon(busy ? "loader" : "folderSearch", 13)}이 컴퓨터에서 폴더 고르기</button>
+                ${typeof window.showDirectoryPicker === "function" ? `<button type="button" class="pmgr-btn is-ghost" data-act="scan-pick-plain"${busy ? " disabled" : ""} title="브라우저가 '이 폴더를 열 수 없음'이라고 할 때">${icon("folder", 13)}다른 방식으로 고르기</button>` : ""}
             </div>
+            ${typeof window.showDirectoryPicker === "function" ? '<p class="pmgr-hint">크롬·엣지가 "시스템 파일이 포함되어 있어 열 수 없음"이라고 하면(마리나라가 AppData 안에 있을 때 등) [다른 방식으로 고르기]를 쓰세요. 그 방식은 읽기만 되므로 백업본은 정리 파일이나 도우미로 지웁니다. 브라우저가 파일을 “업로드”할지 물어도 이 브라우저 안에서만 읽습니다.</p>' : ""}
             ${busy ? `<p class="pmgr-hint">${icon("loader", 12)} ${esc(busy)}</p>` : ""}
             <p class="pmgr-hint"><strong>SSH·호스팅 서버</strong>: 브라우저가 서버의 폴더를 열 수 없으므로, 서버에 깐 도우미가 대신 검사하고 백업본도 지웁니다. ${helperCode() ? "" : "먼저 실행 → 자동 적용에서 도우미를 깔고 연결 코드를 넣어 주십시오."}<br><strong>이 컴퓨터에서 돌리는 마리나라</strong>: 마리나라 엔진 폴더나 그 안의 packages/server/data를 고르면 됩니다. 파일은 이 브라우저 안에서만 읽습니다.${typeof window.showDirectoryPicker === "function" ? "" : " 이 브라우저는 폴더 속 파일을 모두 훑으므로 packages/server/data를 고르는 편이 빠릅니다."}</p>
             ${state.scanError ? `<div class="pmgr-flow-status is-error">${icon("circleX", 13)}${esc(state.scanError)}</div>` : ""}
@@ -2487,12 +2505,12 @@ async function runHelperScan(kind = "scan", paths = []) {
   }
 }
 
-async function runScan() {
+async function runScan(plain = false) {
   if (state.scanBusy) return;
   state.scanError = "";
   let src;
   try {
-    src = await pickDataFolder();
+    src = await pickDataFolder(plain);
   } catch (err) {
     state.scanError = err instanceof Error ? err.message : String(err);
     return renderMain();
@@ -3280,6 +3298,8 @@ function onClick(event) {
       return setView("scan");
     case "scan-pick":
       return void runScan();
+    case "scan-pick-plain":
+      return void runScan(true);
     case "scan-helper":
       return void runHelperScan();
     case "backup-del":

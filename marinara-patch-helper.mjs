@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 마리나라 패치 도우미 · 패치 관리자 1.3.1
+// 마리나라 패치 도우미 · 패치 관리자 1.3.2
 //
 // 마리나라를 이 도우미로 켜 두면, 패치 관리자의 [자동 적용]을 눌렀을 때 도우미가 마리나라를 잠깐 끄고,
 // 꺼진 동안 패치를 넣은 뒤 다시 켭니다. 터미널을 다시 열 필요가 없습니다(SSH로 쓰는 서버, 호스팅 서버도 같음).
@@ -20,7 +20,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "node:net";
 
-const VERSION = "1.3.1";
+const VERSION = "1.3.2";
 const MANAGER_NAME = "패치 관리자";
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -274,6 +274,13 @@ let stopping = false;
 
 async function watch() {
   let seen = null;
+  // Say once how the link to the manager stands, so a silent helper can be told apart from a missing one.
+  let link = "";
+  const linkState = (state, text) => {
+    if (state !== link) say(text);
+    link = state;
+  };
+  const startedAt = Date.now();
   for (;;) {
     await sleep(3000);
     if (stopping) return;
@@ -281,10 +288,16 @@ async function watch() {
     let value;
     try {
       value = await readStorage();
-    } catch {
+    } catch (e) {
+      // The server takes a while to come up; only complain once it should have.
+      if (Date.now() - startedAt > 60000) linkState("error:" + e.message, "패치 관리자에 연결하지 못했습니다: " + e.message);
       continue;
     }
-    if (!value) continue;
+    if (!value) {
+      linkState("missing", "\"" + MANAGER_NAME + "\" 확장을 찾지 못했습니다. 외부 확장에서 켜져(승인되어) 있는지 확인해 주세요. 찾으면 바로 연결합니다.");
+      continue;
+    }
+    linkState("ok", "패치 관리자와 연결했습니다. 이제 [자동 적용] · [서버에서 검사]를 쓸 수 있습니다.");
     try {
       if (unsent) {
         await report(unsent);
