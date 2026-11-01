@@ -6,7 +6,7 @@
 // 사용자가 node로 실행합니다. 마리나라를 다시 켜면 설치 기록(/api/capability-packages/installed)의 파일 해시를
 // 실행 전과 비교해 적용 여부를 알아내고, 대상 패키지가 업데이트되면 "다시 실행 필요"로 표시합니다.
 
-const PM_VERSION = "1.3.0";
+const PM_VERSION = "1.3.1";
 const GH_LIMIT = 8 * 1024 * 1024;
 const SCRIPT_LIMIT = 2 * 1024 * 1024;
 let stopped = false;
@@ -594,7 +594,7 @@ const ICONS = {
   chevronDown: '<path d="m6 9 6 6 6-6"/>',
 };
 function icon(name, size = 14) {
-  return `<svg class="pm-i${name === "loader" ? " pm-spin" : ""}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+  return `<svg class="pmgr-i${name === "loader" ? " pmgr-spin" : ""}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
@@ -1211,8 +1211,18 @@ function readEnv(file) {
   } catch {}
   return out;
 }
-const env = { ...readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")), ...process.env };
-const port = Number(opt("--port") || env.PORT || 7860);
+// The server gets the environment start.bat / start.sh give it: .env loaded before Node starts (so settings
+// such as NODE_OPTIONS --require add-ons take effect), then the launchers' own defaults. Only the server gets
+// it; patch scripts run with this helper's plain environment, without those add-ons preloaded.
+const fileEnv = {};
+for (const [key, value] of Object.entries(readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")))) if (value !== "") fileEnv[key] = value;
+const env = { ...process.env, ...fileEnv };
+if (opt("--port")) env.PORT = opt("--port");
+env.NODE_ENV = "production";
+env.PORT = env.PORT || "7860";
+env.HOST = env.HOST || "0.0.0.0";
+env.SIDECAR_RUNTIME_INSTALL_ENABLED = env.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+const port = Number(env.PORT) || 7860;
 const dataDir = opt("--data") ? resolve(opt("--data")) : env.DATA_DIR ? resolve(serverRoot, env.DATA_DIR) : join(serverRoot, "data");
 const base = "http://127.0.0.1:" + port + "/api";
 
@@ -1538,10 +1548,10 @@ for (;;) {
   }
   // Marinara allows its graceful restart only when this env names its parent: that is what makes
   // this helper the supervisor that gets the restart's gap.
-  child = spawn(process.execPath, [join(serverRoot, "dist", "index.js")], {
-    cwd: engine,
+  child = spawn(process.execPath, ["dist/index.js"], {
+    cwd: serverRoot,
     stdio: "inherit",
-    env: { ...process.env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
+    env: { ...env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
   });
   const code = await exited(child);
   child = null;
@@ -1768,45 +1778,45 @@ async function copyText(text) {
 
 function buildShell() {
   root = document.createElement("div");
-  root.className = "pm-overlay";
+  root.className = "pmgr-overlay";
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-modal", "true");
   root.setAttribute("aria-label", "패치 관리자");
   root.innerHTML = `
-        <div class="pm-backdrop" data-act="close"></div>
-        <div class="pm-panel">
-            <header class="pm-header">
-                <div class="pm-title">
-                    <span class="pm-title-icon">${icon("wrench", 16)}</span>
-                    <div class="pm-title-text">
+        <div class="pmgr-backdrop" data-act="close"></div>
+        <div class="pmgr-panel">
+            <header class="pmgr-header">
+                <div class="pmgr-title">
+                    <span class="pmgr-title-icon">${icon("wrench", 16)}</span>
+                    <div class="pmgr-title-text">
                         <strong>패치 관리자</strong>
-                        <span class="pm-sub" data-ref="sub"></span>
+                        <span class="pmgr-sub" data-ref="sub"></span>
                     </div>
                 </div>
-                <div class="pm-search-row">
-                    <button type="button" class="pm-icon-btn pm-menu-btn" data-act="side-toggle" title="필터 메뉴" aria-label="필터 메뉴">${icon("panelLeft", 16)}</button>
-                    <label class="pm-search">
+                <div class="pmgr-search-row">
+                    <button type="button" class="pmgr-icon-btn pmgr-menu-btn" data-act="side-toggle" title="필터 메뉴" aria-label="필터 메뉴">${icon("panelLeft", 16)}</button>
+                    <label class="pmgr-search">
                         ${icon("search", 14)}
                         <input type="search" data-ref="search" aria-label="패치 검색" placeholder="이름, 설명, 대상, 태그, 메모 검색 · Enter" autocomplete="off" spellcheck="false">
                     </label>
-                    <button type="button" class="pm-icon-btn pm-refresh-btn is-mobile" data-act="refresh" title="새로고침 · 업데이트 확인" aria-label="새로고침 · 업데이트 확인">${icon("refresh", 15)}</button>
+                    <button type="button" class="pmgr-icon-btn pmgr-refresh-btn is-mobile" data-act="refresh" title="새로고침 · 업데이트 확인" aria-label="새로고침 · 업데이트 확인">${icon("refresh", 15)}</button>
                 </div>
-                <div class="pm-header-actions">
-                    <button type="button" class="pm-head-btn" data-act="add-open" title="파일 또는 GitHub 저장소에서 패치 추가">${icon("plus", 14)}<span>패치 추가</span></button>
-                    <button type="button" class="pm-head-btn" data-act="run-open" title="켜 둔 패치를 한 번에 실행하는 파일 받기">${icon("terminal", 14)}<span>실행</span></button>
-                    <button type="button" class="pm-head-btn" data-act="scan-open" title="마리나라 data 폴더에서 들어 있는 패치와 백업본 찾기">${icon("folderSearch", 14)}<span>검사</span></button>
-                    <button type="button" class="pm-icon-btn" data-act="settings-open" title="설정" aria-label="설정">${icon("settings", 15)}</button>
-                    <button type="button" class="pm-icon-btn pm-refresh-btn is-desktop" data-act="refresh" title="새로고침 · 업데이트 확인" aria-label="새로고침 · 업데이트 확인">${icon("refresh", 15)}</button>
-                    <button type="button" class="pm-icon-btn" data-act="close" title="닫기" aria-label="닫기">${icon("x", 16)}</button>
+                <div class="pmgr-header-actions">
+                    <button type="button" class="pmgr-head-btn" data-act="add-open" title="파일 또는 GitHub 저장소에서 패치 추가">${icon("plus", 14)}<span>패치 추가</span></button>
+                    <button type="button" class="pmgr-head-btn" data-act="run-open" title="켜 둔 패치를 한 번에 실행하는 파일 받기">${icon("terminal", 14)}<span>실행</span></button>
+                    <button type="button" class="pmgr-head-btn" data-act="scan-open" title="마리나라 data 폴더에서 들어 있는 패치와 백업본 찾기">${icon("folderSearch", 14)}<span>검사</span></button>
+                    <button type="button" class="pmgr-icon-btn" data-act="settings-open" title="설정" aria-label="설정">${icon("settings", 15)}</button>
+                    <button type="button" class="pmgr-icon-btn pmgr-refresh-btn is-desktop" data-act="refresh" title="새로고침 · 업데이트 확인" aria-label="새로고침 · 업데이트 확인">${icon("refresh", 15)}</button>
+                    <button type="button" class="pmgr-icon-btn" data-act="close" title="닫기" aria-label="닫기">${icon("x", 16)}</button>
                 </div>
             </header>
-            <div class="pm-body">
-                <div class="pm-scrim" data-act="side-close"></div>
-                <aside class="pm-side" data-ref="side"></aside>
-                <main class="pm-main" data-ref="main"></main>
-                <section class="pm-detail" data-ref="detail"></section>
+            <div class="pmgr-body">
+                <div class="pmgr-scrim" data-act="side-close"></div>
+                <aside class="pmgr-side" data-ref="side"></aside>
+                <main class="pmgr-main" data-ref="main"></main>
+                <section class="pmgr-detail" data-ref="detail"></section>
             </div>
-            <div class="pm-notice" data-ref="notice" role="status" aria-live="polite"></div>
+            <div class="pmgr-notice" data-ref="notice" role="status" aria-live="polite"></div>
         </div>`;
   refs = {};
   for (const el of root.querySelectorAll("[data-ref]")) refs[el.dataset.ref] = el;
@@ -1825,8 +1835,8 @@ function buildShell() {
 }
 
 function navItem(act, value, active, iconHtml, label, count, extra = "") {
-  return `<button type="button" class="pm-nav${active ? " is-active" : ""}" data-act="${act}" data-v="${esc(value)}">
-        ${iconHtml}<span class="pm-nav-label">${esc(label)}</span>${extra}<span class="pm-count">${count}</span></button>`;
+  return `<button type="button" class="pmgr-nav${active ? " is-active" : ""}" data-act="${act}" data-v="${esc(value)}">
+        ${iconHtml}<span class="pmgr-nav-label">${esc(label)}</span>${extra}<span class="pmgr-count">${count}</span></button>`;
 }
 
 const renderedHtml = new WeakMap();
@@ -1922,14 +1932,14 @@ function renderSide() {
   const groups = state.groups
     .map((g, index) => {
       if (state.editingGroup === g.id) {
-        return `<div class="pm-nav is-editing"><span class="pm-dot" style="--c:${esc(g.color)}"></span>
-                <input class="pm-inline-input" data-group-input="${esc(g.id)}" value="${esc(g.name)}" maxlength="40"></div>`;
+        return `<div class="pmgr-nav is-editing"><span class="pmgr-dot" style="--c:${esc(g.color)}"></span>
+                <input class="pmgr-inline-input" data-group-input="${esc(g.id)}" value="${esc(g.name)}" maxlength="40"></div>`;
       }
-      return `<div class="pm-nav-wrap" draggable="true" data-group-drag="${esc(g.id)}" title="끌어서 순서 변경">
-            ${navItem("f-group", g.id, f.group === g.id, `<span class="pm-dot" style="--c:${esc(g.color)}"></span>`, g.name, groupCount(g.id))}
-            <span class="pm-nav-tools">
-                <button type="button" class="pm-group-up" data-act="group-up" data-id="${esc(g.id)}"${index ? "" : " disabled"} title="위로" aria-label="위로 이동">${icon("chevronUp", 12)}</button>
-                <button type="button" data-act="group-color" data-id="${esc(g.id)}" title="색 바꾸기" aria-label="색 바꾸기"><span class="pm-dot" style="--c:${esc(g.color)}"></span></button>
+      return `<div class="pmgr-nav-wrap" draggable="true" data-group-drag="${esc(g.id)}" title="끌어서 순서 변경">
+            ${navItem("f-group", g.id, f.group === g.id, `<span class="pmgr-dot" style="--c:${esc(g.color)}"></span>`, g.name, groupCount(g.id))}
+            <span class="pmgr-nav-tools">
+                <button type="button" class="pmgr-group-up" data-act="group-up" data-id="${esc(g.id)}"${index ? "" : " disabled"} title="위로" aria-label="위로 이동">${icon("chevronUp", 12)}</button>
+                <button type="button" data-act="group-color" data-id="${esc(g.id)}" title="색 바꾸기" aria-label="색 바꾸기"><span class="pmgr-dot" style="--c:${esc(g.color)}"></span></button>
                 <button type="button" data-act="group-rename" data-id="${esc(g.id)}" title="이름 바꾸기" aria-label="이름 바꾸기">${icon("pencil", 12)}</button>
                 <button type="button" data-act="group-del" data-id="${esc(g.id)}" title="그룹 삭제 (패치는 미분류로 이동)" aria-label="그룹 삭제">${icon("trash", 12)}</button>
             </span></div>`;
@@ -1937,12 +1947,12 @@ function renderSide() {
     .join("");
   const newGroup =
     state.editingGroup === "new"
-      ? `<div class="pm-nav is-editing">${icon("folder", 14)}<input class="pm-inline-input" data-group-input="new" placeholder="새 그룹 이름" maxlength="40"></div>`
-      : `<button type="button" class="pm-nav pm-nav-add" data-act="group-add">${icon("plus", 14)}<span class="pm-nav-label">새 그룹</span></button>`;
+      ? `<div class="pmgr-nav is-editing">${icon("folder", 14)}<input class="pmgr-inline-input" data-group-input="new" placeholder="새 그룹 이름" maxlength="40"></div>`
+      : `<button type="button" class="pmgr-nav pmgr-nav-add" data-act="group-add">${icon("plus", 14)}<span class="pmgr-nav-label">새 그룹</span></button>`;
   const targetIds = [...new Set(items.map((p) => p.target).filter(Boolean))].sort();
   const targetBlock = targetIds.length
-    ? `<div class="pm-side-block">
-            <div class="pm-side-title">대상 패키지</div>
+    ? `<div class="pmgr-side-block">
+            <div class="pmgr-side-title">대상 패키지</div>
             ${targetIds.map((id) => navItem("f-target", id, f.target === id, icon("package", 14), targetLabel(id), count((p) => p.target === id))).join("")}
         </div>`
     : "";
@@ -1952,28 +1962,28 @@ function renderSide() {
   const all = state.checkingAll;
   const ghBlock =
     linked || excluded
-      ? `<div class="pm-side-block">
-            <div class="pm-side-title">출처 · 실행</div>
+      ? `<div class="pmgr-side-block">
+            <div class="pmgr-side-title">출처 · 실행</div>
             ${linked ? navItem("f-gh", "linked", f.gh === "linked", icon("github", 14), "GitHub 연결됨", linked) : ""}
             ${updates ? navItem("f-gh", "update", f.gh === "update", icon("arrowUp", 14), "업데이트 있음", updates) : ""}
             ${excluded ? navItem("f-gh", "excluded", f.gh === "excluded", icon("powerOff", 14), "실행 목록에서 뺌", excluded) : ""}
-            ${linked ? `<button type="button" class="pm-nav pm-nav-add" data-act="gh-check-all"${all ? " disabled" : ""}>${icon(all ? "loader" : "refresh", 14)}<span class="pm-nav-label">${all ? `확인 중 ${all.done}/${all.total}` : "업데이트 모두 확인"}</span></button>` : ""}
+            ${linked ? `<button type="button" class="pmgr-nav pmgr-nav-add" data-act="gh-check-all"${all ? " disabled" : ""}>${icon(all ? "loader" : "refresh", 14)}<span class="pmgr-nav-label">${all ? `확인 중 ${all.done}/${all.total}` : "업데이트 모두 확인"}</span></button>` : ""}
         </div>`
       : "";
   const tags = allTags();
   setHtml(
     refs.side,
     `
-        <div class="pm-side-block">
+        <div class="pmgr-side-block">
             ${navItem("f-pinned", "1", f.pinned, icon("pin", 14), "즐겨찾기", count((p) => p.pinned))}
         </div>
-        <div class="pm-side-block">
-            <div class="pm-side-title">상태</div>
+        <div class="pmgr-side-block">
+            <div class="pmgr-side-title">상태</div>
             ${statusRows.map(([key, ic, label, n]) => navItem("f-status", key, f.status === key, ic, label, n)).join("")}
         </div>
         ${targetBlock}
-        <div class="pm-side-block">
-            <div class="pm-side-title pm-side-title-row">그룹${state.groups.length ? `<button type="button" class="pm-side-edit${state.groupEdit ? " is-on" : ""}" data-act="group-edit" aria-pressed="${state.groupEdit}" title="${state.groupEdit ? "편집 완료" : "그룹 편집"}" aria-label="${state.groupEdit ? "편집 완료" : "그룹 편집"}">${icon(state.groupEdit ? "check" : "pencil", 12)}</button>` : ""}</div>
+        <div class="pmgr-side-block">
+            <div class="pmgr-side-title pmgr-side-title-row">그룹${state.groups.length ? `<button type="button" class="pmgr-side-edit${state.groupEdit ? " is-on" : ""}" data-act="group-edit" aria-pressed="${state.groupEdit}" title="${state.groupEdit ? "편집 완료" : "그룹 편집"}" aria-label="${state.groupEdit ? "편집 완료" : "그룹 편집"}">${icon(state.groupEdit ? "check" : "pencil", 12)}</button>` : ""}</div>
             ${state.groups.length ? navItem("f-group-all", "", !f.group, icon("layers", 14), "전체", items.length) : ""}
             ${groups}
             ${state.groups.length ? navItem("f-group", "__none", f.group === "__none", icon("inbox", 14), "미분류", ungrouped) : ""}
@@ -1982,9 +1992,9 @@ function renderSide() {
         ${ghBlock}
         ${
           tags.length
-            ? `<div class="pm-side-block">
-            <div class="pm-side-title">태그</div>
-            <div class="pm-tag-cloud">${tags.map(([t, n]) => `<button type="button" class="pm-tag${f.tag === t ? " is-active" : ""}" data-act="f-tag" data-v="${esc(t)}">#${esc(t)}<span>${n}</span></button>`).join("")}</div>
+            ? `<div class="pmgr-side-block">
+            <div class="pmgr-side-title">태그</div>
+            <div class="pmgr-tag-cloud">${tags.map(([t, n]) => `<button type="button" class="pmgr-tag${f.tag === t ? " is-active" : ""}" data-act="f-tag" data-v="${esc(t)}">#${esc(t)}<span>${n}</span></button>`).join("")}</div>
         </div>`
             : ""
         }`,
@@ -2001,14 +2011,14 @@ const groupedView = () => state.prefs.grouped && state.groups.length > 0 && !sta
 
 function statusPill(p) {
   const key = statusOf(p);
-  const update = state.updates.has(p.id) ? `<span class="pm-status is-update" title="GitHub에 새 코드가 있습니다">${icon("arrowUp", 11)}업데이트</span>` : "";
-  return `<span class="pm-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${STATUS[key].label}</span>${update}`;
+  const update = state.updates.has(p.id) ? `<span class="pmgr-status is-update" title="GitHub에 새 코드가 있습니다">${icon("arrowUp", 11)}업데이트</span>` : "";
+  return `<span class="pmgr-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${STATUS[key].label}</span>${update}`;
 }
 
 function targetChip(p) {
-  if (!p.target) return `<span class="pm-chip" title="대상 패키지 미지정">${icon("package", 11)}대상 미지정</span>`;
+  if (!p.target) return `<span class="pmgr-chip" title="대상 패키지 미지정">${icon("package", 11)}대상 미지정</span>`;
   const t = targetOf(p);
-  return `<span class="pm-chip" title="${esc(targetLabel(p.target))}">${icon("package", 11)}${esc(t?.name || p.target)}${t?.version ? ` ${esc(t.version)}` : ""}</span>`;
+  return `<span class="pmgr-chip" title="${esc(targetLabel(p.target))}">${icon("package", 11)}${esc(t?.name || p.target)}${t?.version ? ` ${esc(t.version)}` : ""}</span>`;
 }
 
 function card(p) {
@@ -2019,39 +2029,39 @@ function card(p) {
   const id = esc(p.id);
   const tagHtml = `${p.tags
     .slice(0, 3)
-    .map((t) => `<span class="pm-chip">#${esc(t)}</span>`)
-    .join("")}${p.tags.length > 3 ? `<span class="pm-chip">+${p.tags.length - 3}</span>` : ""}`;
+    .map((t) => `<span class="pmgr-chip">#${esc(t)}</span>`)
+    .join("")}${p.tags.length > 3 ? `<span class="pmgr-chip">+${p.tags.length - 3}</span>` : ""}`;
   const tint = groupOf(p.group)?.color;
   const common = `data-act="select" data-id="${id}"${tint ? ` style="--pm-on:${esc(tint)}"` : ""}`;
-  const check = `<button type="button" class="pm-check${checked ? " is-on" : ""}" data-act="check" data-id="${id}" aria-pressed="${checked}" aria-label="선택">${icon("check", 11)}</button>`;
-  const pin = `<button type="button" class="pm-pin${p.pinned ? " is-on" : ""}" data-act="pin" data-id="${id}" aria-pressed="${p.pinned}" title="${p.pinned ? "고정 해제" : "위에 고정"}" aria-label="고정">${icon("pin", 13)}</button>`;
+  const check = `<button type="button" class="pmgr-check${checked ? " is-on" : ""}" data-act="check" data-id="${id}" aria-pressed="${checked}" aria-label="선택">${icon("check", 11)}</button>`;
+  const pin = `<button type="button" class="pmgr-pin${p.pinned ? " is-on" : ""}" data-act="pin" data-id="${id}" aria-pressed="${p.pinned}" title="${p.pinned ? "고정 해제" : "위에 고정"}" aria-label="고정">${icon("pin", 13)}</button>`;
   const includeLabel = p.include ? "실행 목록에서 빼기" : "실행 목록에 넣기";
-  const actions = `<div class="pm-card-actions">
-        <button type="button" class="pm-act${p.include ? " is-on" : ""}" data-act="include" data-id="${id}" title="${includeLabel}" aria-label="${includeLabel}">${icon(p.include ? "power" : "powerOff", 13)}</button>
-        <button type="button" class="pm-act" data-act="run-one" data-id="${id}" title="이 패치만 실행하는 파일 받기" aria-label="이 패치만 실행하는 파일 받기">${icon("download", 13)}</button>
-        <button type="button" class="pm-act is-danger" data-act="delete" data-id="${id}" title="삭제" aria-label="삭제">${icon("trash", 13)}</button></div>`;
+  const actions = `<div class="pmgr-card-actions">
+        <button type="button" class="pmgr-act${p.include ? " is-on" : ""}" data-act="include" data-id="${id}" title="${includeLabel}" aria-label="${includeLabel}">${icon(p.include ? "power" : "powerOff", 13)}</button>
+        <button type="button" class="pmgr-act" data-act="run-one" data-id="${id}" title="이 패치만 실행하는 파일 받기" aria-label="이 패치만 실행하는 파일 받기">${icon("download", 13)}</button>
+        <button type="button" class="pmgr-act is-danger" data-act="delete" data-id="${id}" title="삭제" aria-label="삭제">${icon("trash", 13)}</button></div>`;
   const cls = `is-${STATUS[key].css}${checked ? " is-checked" : ""}${selected ? " is-selected" : ""}${p.include ? "" : " is-excluded"}`;
-  const order = state.prefs.sort === "order" ? `<span class="pm-order">${state.patches.indexOf(p) + 1}</span>` : "";
-  const badges = `${p.source.kind === "github" ? `<span class="pm-badge" title="${esc(p.source.repo)}">${icon("github", 11)}</span>` : `<span class="pm-badge" title="파일에서 추가">${icon("fileCode", 11)}</span>`}${p.restore ? `<span class="pm-badge" title="--restore로 되돌릴 수 있음">${icon("undo", 11)}</span>` : ""}`;
+  const order = state.prefs.sort === "order" ? `<span class="pmgr-order">${state.patches.indexOf(p) + 1}</span>` : "";
+  const badges = `${p.source.kind === "github" ? `<span class="pmgr-badge" title="${esc(p.source.repo)}">${icon("github", 11)}</span>` : `<span class="pmgr-badge" title="파일에서 추가">${icon("fileCode", 11)}</span>`}${p.restore ? `<span class="pmgr-badge" title="--restore로 되돌릴 수 있음">${icon("undo", 11)}</span>` : ""}`;
   if (state.prefs.view === "list") {
-    return `<div class="pm-row ${cls}" ${common}>
+    return `<div class="pmgr-row ${cls}" ${common}>
             ${check}
-            <span class="pm-row-dot is-${STATUS[key].css}" title="${esc(STATUS[key].label)}"></span>
-            <div class="pm-row-main">
-                <div class="pm-row-name">${order}<strong><button type="button" class="pm-name-button" data-act="select" data-id="${id}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong><span class="pm-ver">${esc(p.file)}</span>${state.updates.has(p.id) ? `<span class="pm-status is-update">${icon("arrowUp", 11)}업데이트</span>` : ""}${p.note ? `<span class="pm-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
-                <div class="pm-row-desc">${esc(p.description || "설명 없음")}</div>
+            <span class="pmgr-row-dot is-${STATUS[key].css}" title="${esc(STATUS[key].label)}"></span>
+            <div class="pmgr-row-main">
+                <div class="pmgr-row-name">${order}<strong><button type="button" class="pmgr-name-button" data-act="select" data-id="${id}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong><span class="pmgr-ver">${esc(p.file)}</span>${state.updates.has(p.id) ? `<span class="pmgr-status is-update">${icon("arrowUp", 11)}업데이트</span>` : ""}${p.note ? `<span class="pmgr-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
+                <div class="pmgr-row-desc">${esc(p.description || "설명 없음")}</div>
             </div>
-            <div class="pm-row-meta">${targetChip(p)}${group ? `<span class="pm-chip is-group"><span class="pm-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${badges}</div>
-            <span class="pm-row-date">${fmtDate(p.updatedAt)}</span>
-            <div class="pm-row-tools">${pin}${actions}</div>
+            <div class="pmgr-row-meta">${targetChip(p)}${group ? `<span class="pmgr-chip is-group"><span class="pmgr-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${badges}</div>
+            <span class="pmgr-row-date">${fmtDate(p.updatedAt)}</span>
+            <div class="pmgr-row-tools">${pin}${actions}</div>
         </div>`;
   }
-  return `<article class="pm-card ${cls}" ${common}>
-        <div class="pm-card-top">${order}${statusPill(p)}<span class="pm-grow"></span>${pin}${check}</div>
-        <div class="pm-card-name"><strong><button type="button" class="pm-name-button" data-act="select" data-id="${id}" title="${esc(p.name)}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong></div>
-        <p class="pm-card-desc">${esc(p.description || "설명 없음")}</p>
-        <div class="pm-card-chips">${targetChip(p)}${group ? `<span class="pm-chip is-group"><span class="pm-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${p.note ? `<span class="pm-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
-        <div class="pm-card-foot"><div class="pm-badges">${badges}</div>${actions}</div>
+  return `<article class="pmgr-card ${cls}" ${common}>
+        <div class="pmgr-card-top">${order}${statusPill(p)}<span class="pmgr-grow"></span>${pin}${check}</div>
+        <div class="pmgr-card-name"><strong><button type="button" class="pmgr-name-button" data-act="select" data-id="${id}" title="${esc(p.name)}" aria-label="${esc(p.name)} 상세">${esc(p.name)}</button></strong></div>
+        <p class="pmgr-card-desc">${esc(p.description || "설명 없음")}</p>
+        <div class="pmgr-card-chips">${targetChip(p)}${group ? `<span class="pmgr-chip is-group"><span class="pmgr-dot" style="--c:${esc(group.color)}"></span>${esc(group.name)}</span>` : ""}${tagHtml}${p.note ? `<span class="pmgr-has-note" title="메모 있음">${icon("note", 11)}</span>` : ""}</div>
+        <div class="pmgr-card-foot"><div class="pmgr-badges">${badges}</div>${actions}</div>
     </article>`;
 }
 
@@ -2059,13 +2069,13 @@ function runBanner() {
   const run = state.lastRun;
   if (!run) return "";
   const waiting = run.items.filter((x) => !x.done);
-  return `<div class="pm-banner">
+  return `<div class="pmgr-banner">
         ${icon("clock", 14)}
-        <div class="pm-banner-text"><strong>${run.mode === "restore" ? "되돌리기" : "적용"} 실행 대기 · ${waiting.length}개</strong>
+        <div class="pmgr-banner-text"><strong>${run.mode === "restore" ? "되돌리기" : "적용"} 실행 대기 · ${waiting.length}개</strong>
         <span>${fmtTime(run.at)}에 실행 파일을 받았습니다. 마리나라를 끄고 실행한 뒤 다시 켜면 자동으로 확인합니다.</span></div>
-        <div class="pm-banner-actions">
-            <button type="button" class="pm-btn" data-act="run-confirm">${icon("check", 13)}${run.mode === "restore" ? "되돌렸음" : "적용했음"}</button>
-            <button type="button" class="pm-btn is-ghost" data-act="run-dismiss">취소</button>
+        <div class="pmgr-banner-actions">
+            <button type="button" class="pmgr-btn" data-act="run-confirm">${icon("check", 13)}${run.mode === "restore" ? "되돌렸음" : "적용했음"}</button>
+            <button type="button" class="pmgr-btn is-ghost" data-act="run-dismiss">취소</button>
         </div>
     </div>`;
 }
@@ -2073,38 +2083,38 @@ function runBanner() {
 function renderList() {
   const prefs = state.prefs;
   const visible = sorted(state.patches.filter(matches));
-  const toolbar = `<div class="pm-toolbar">
-        ${state.loading && !state.loadedStorage ? '<span class="pm-result">불러오는 중…</span>' : `${filterActive() ? `<button type="button" class="pm-seg-btn" data-act="f-reset" title="필터 초기화" aria-label="필터 초기화">${icon("funnelX", 13)}</button>` : ""}<span class="pm-result pm-crumb">${esc(filterCrumb())}</span>`}
-        <span class="pm-grow"></span>
-        <label class="pm-select">${icon("rows", 13)}
+  const toolbar = `<div class="pmgr-toolbar">
+        ${state.loading && !state.loadedStorage ? '<span class="pmgr-result">불러오는 중…</span>' : `${filterActive() ? `<button type="button" class="pmgr-seg-btn" data-act="f-reset" title="필터 초기화" aria-label="필터 초기화">${icon("funnelX", 13)}</button>` : ""}<span class="pmgr-result pmgr-crumb">${esc(filterCrumb())}</span>`}
+        <span class="pmgr-grow"></span>
+        <label class="pmgr-select">${icon("rows", 13)}
             <select data-ref-sort aria-label="정렬">${Object.entries(SORTS)
               .map(([k, v]) => `<option value="${k}"${prefs.sort === k ? " selected" : ""}>${v}</option>`)
               .join("")}</select>
         </label>
-        ${state.groups.length && prefs.sort !== "order" ? `<button type="button" class="pm-seg-btn${prefs.grouped ? " is-active" : ""}" data-act="grouped" title="그룹별로 묶어 보기">${icon("folder", 13)}<span>그룹별</span></button>` : ""}
-        <div class="pm-seg" role="group" aria-label="보기 방식">
+        ${state.groups.length && prefs.sort !== "order" ? `<button type="button" class="pmgr-seg-btn${prefs.grouped ? " is-active" : ""}" data-act="grouped" title="그룹별로 묶어 보기">${icon("folder", 13)}<span>그룹별</span></button>` : ""}
+        <div class="pmgr-seg" role="group" aria-label="보기 방식">
             <button type="button" class="${prefs.view === "grid" ? "is-active" : ""}" data-act="view" data-v="grid" title="카드" aria-label="카드 보기">${icon("grid", 13)}</button>
             <button type="button" class="${prefs.view === "list" ? "is-active" : ""}" data-act="view" data-v="list" title="목록" aria-label="목록 보기">${icon("list", 13)}</button>
         </div>
     </div>`;
   const targetsWarn = state.targetsError && state.patches.some((p) => p.target)
-    ? `<div class="pm-flow-note is-warn">${icon("shieldAlert", 13)}<span>설치 패키지 목록을 읽지 못해 적용 여부를 확인하지 못했습니다: ${esc(state.targetsError)}</span></div>`
+    ? `<div class="pmgr-flow-note is-warn">${icon("shieldAlert", 13)}<span>설치 패키지 목록을 읽지 못해 적용 여부를 확인하지 못했습니다: ${esc(state.targetsError)}</span></div>`
     : "";
   let content;
   if (!state.loadedStorage && state.loading) {
-    content = `<div class="pm-grid">${'<div class="pm-skeleton"></div>'.repeat(6)}</div>`;
+    content = `<div class="pmgr-grid">${'<div class="pmgr-skeleton"></div>'.repeat(6)}</div>`;
   } else if (!state.patches.length) {
-    content = `<div class="pm-empty">${icon("wrench", 22)}<strong>추가한 패치가 없습니다</strong><span>patch/apply-patch.mjs 같은 패치 스크립트를 GitHub 저장소나 파일에서 추가할 수 있습니다.</span><button type="button" class="pm-btn is-primary" data-act="add-open">${icon("plus", 13)}패치 추가</button></div>`;
+    content = `<div class="pmgr-empty">${icon("wrench", 22)}<strong>추가한 패치가 없습니다</strong><span>patch/apply-patch.mjs 같은 패치 스크립트를 GitHub 저장소나 파일에서 추가할 수 있습니다.</span><button type="button" class="pmgr-btn is-primary" data-act="add-open">${icon("plus", 13)}패치 추가</button></div>`;
   } else if (!visible.length) {
-    content = `<div class="pm-empty">${icon("search", 22)}<strong>조건에 맞는 패치가 없습니다</strong><button type="button" class="pm-btn" data-act="f-reset">필터 초기화</button></div>`;
+    content = `<div class="pmgr-empty">${icon("search", 22)}<strong>조건에 맞는 패치가 없습니다</strong><button type="button" class="pmgr-btn" data-act="f-reset">필터 초기화</button></div>`;
   } else {
-    const wrap = (list) => `<div class="${prefs.view === "list" ? "pm-list" : "pm-grid"}">${list.map(card).join("")}</div>`;
+    const wrap = (list) => `<div class="${prefs.view === "list" ? "pmgr-list" : "pmgr-grid"}">${list.map(card).join("")}</div>`;
     if (groupedView()) {
       content = [...state.groups.map((g) => [g, visible.filter((p) => p.group === g.id)]), [null, visible.filter((p) => !groupOf(p.group))]]
         .filter(([, list]) => list.length)
         .map(
-          ([g, list]) => `<section class="pm-section">
-                <h3 class="pm-section-title">${g ? `<span class="pm-dot" style="--c:${esc(g.color)}"></span>${esc(g.name)}` : `${icon("inbox", 13)}미분류`}<span>${list.length}</span></h3>
+          ([g, list]) => `<section class="pmgr-section">
+                <h3 class="pmgr-section-title">${g ? `<span class="pmgr-dot" style="--c:${esc(g.color)}"></span>${esc(g.name)}` : `${icon("inbox", 13)}미분류`}<span>${list.length}</span></h3>
                 ${wrap(list)}</section>`,
         )
         .join("");
@@ -2112,7 +2122,7 @@ function renderList() {
       content = wrap(visible);
     }
   }
-  setHtml(refs.main, `${toolbar}<div class="pm-scroll">${runBanner()}${targetsWarn}${content}</div>${bulkHtml()}`);
+  setHtml(refs.main, `${toolbar}<div class="pmgr-scroll">${runBanner()}${targetsWarn}${content}</div>${bulkHtml()}`);
 }
 
 function bulkHtml() {
@@ -2125,28 +2135,28 @@ function bulkHtml() {
   const first = groupOf(patchOf(ids[0])?.group)?.id || "";
   const shared = ids.every((id) => (groupOf(patchOf(id)?.group)?.id || "") === first) ? first : null;
   const panelBtn = (v, ico, label) =>
-    `<button type="button" class="pm-icon-btn${state.bulkPanel === v ? " is-on" : ""}" data-act="bulk-panel" data-v="${v}" aria-expanded="${state.bulkPanel === v}" aria-label="${label}" title="${label}">${icon(ico, 15)}</button>`;
+    `<button type="button" class="pmgr-icon-btn${state.bulkPanel === v ? " is-on" : ""}" data-act="bulk-panel" data-v="${v}" aria-expanded="${state.bulkPanel === v}" aria-label="${label}" title="${label}">${icon(ico, 15)}</button>`;
   let panel = "";
   if (state.bulkPanel === "group") {
     const groups = [["", "미분류", null], ...state.groups.map((g) => [g.id, g.name, g.color])];
-    panel = `<div class="pm-bulk-panel">
-            <span class="pm-field-label">${icon("folder", 12)}그룹으로 이동</span>
-            <div class="pm-tag-cloud pm-tag-suggest">${groups.map(([v, name, c]) => `<button type="button" class="pm-tag${shared === v ? " is-active" : ""}" data-act="bulk-group" data-v="${esc(v)}">${c ? `<span class="pm-dot" style="--c:${esc(c)}"></span>` : icon("inbox", 11)}${esc(name)}</button>`).join("")}</div>
+    panel = `<div class="pmgr-bulk-panel">
+            <span class="pmgr-field-label">${icon("folder", 12)}그룹으로 이동</span>
+            <div class="pmgr-tag-cloud pmgr-tag-suggest">${groups.map(([v, name, c]) => `<button type="button" class="pmgr-tag${shared === v ? " is-active" : ""}" data-act="bulk-group" data-v="${esc(v)}">${c ? `<span class="pmgr-dot" style="--c:${esc(c)}"></span>` : icon("inbox", 11)}${esc(name)}</button>`).join("")}</div>
         </div>`;
   } else if (state.bulkPanel === "tag") {
-    panel = `<div class="pm-bulk-panel">
-            <label class="pm-tag-input">${icon("tag", 13)}<input data-bulk-tag placeholder="태그 추가 (Enter, 쉼표, #)" enterkeyhint="done"></label>
-            <div class="pm-tag-cloud pm-tag-suggest" data-tag-suggest></div>
+    panel = `<div class="pmgr-bulk-panel">
+            <label class="pmgr-tag-input">${icon("tag", 13)}<input data-bulk-tag placeholder="태그 추가 (Enter, 쉼표, #)" enterkeyhint="done"></label>
+            <div class="pmgr-tag-cloud pmgr-tag-suggest" data-tag-suggest></div>
         </div>`;
   }
-  return `<div class="pm-bulk">${panel}
-        <div class="pm-bulk-row">
-            <button type="button" class="pm-icon-btn" data-act="bulk-clear" aria-label="선택 해제" title="선택 해제">${icon("x", 15)}</button>
+  return `<div class="pmgr-bulk">${panel}
+        <div class="pmgr-bulk-row">
+            <button type="button" class="pmgr-icon-btn" data-act="bulk-clear" aria-label="선택 해제" title="선택 해제">${icon("x", 15)}</button>
             <strong>${ids.length}개 선택</strong>
             ${panelBtn("group", "folder", "그룹 이동")}
             ${panelBtn("tag", "tag", "태그 추가")}
-            <button type="button" class="pm-icon-btn${pinned ? " is-on" : ""}" data-act="bulk-pin" aria-pressed="${pinned}" aria-label="${pinned ? "고정 해제" : "고정"}" title="${pinned ? "고정 해제" : "고정"}">${icon("pin", 15)}</button>
-            <button type="button" class="pm-icon-btn" data-act="bulk-run" aria-label="선택한 패치만 실행하는 파일 받기" title="선택한 패치만 실행하는 파일 받기">${icon("download", 15)}</button>
+            <button type="button" class="pmgr-icon-btn${pinned ? " is-on" : ""}" data-act="bulk-pin" aria-pressed="${pinned}" aria-label="${pinned ? "고정 해제" : "고정"}" title="${pinned ? "고정 해제" : "고정"}">${icon("pin", 15)}</button>
+            <button type="button" class="pmgr-icon-btn" data-act="bulk-run" aria-label="선택한 패치만 실행하는 파일 받기" title="선택한 패치만 실행하는 파일 받기">${icon("download", 15)}</button>
         </div>
     </div>`;
 }
@@ -2154,8 +2164,8 @@ function bulkHtml() {
 // ----- 추가 · 연결 · 업데이트 흐름 -----
 
 function flowStatusHtml(flow) {
-  if (flow.busy) return `<div class="pm-flow-status">${icon("loader", 13)}${esc(flow.busy)}</div>`;
-  if (flow.error) return `<div class="pm-flow-status is-error">${icon("circleX", 13)}${esc(flow.error)}</div>`;
+  if (flow.busy) return `<div class="pmgr-flow-status">${icon("loader", 13)}${esc(flow.busy)}</div>`;
+  if (flow.error) return `<div class="pmgr-flow-status is-error">${icon("circleX", 13)}${esc(flow.error)}</div>`;
   return "";
 }
 
@@ -2183,93 +2193,93 @@ function previewHtml(flow, p) {
   if (flow.mode === "update" && same) notes.push(["hint", "이미 같은 코드입니다."]);
   const primary =
     flow.mode === "link"
-      ? `<button type="button" class="pm-btn is-primary" data-act="flow-link"${dis}>${icon("link", 13)}이 파일 연결</button>`
-      : `<button type="button" class="pm-btn is-primary" data-act="flow-apply"${dis || (dupe || same ? " disabled" : "")}>${p ? "업데이트 받기" : "패치 추가"}</button>`;
+      ? `<button type="button" class="pmgr-btn is-primary" data-act="flow-link"${dis}>${icon("link", 13)}이 파일 연결</button>`
+      : `<button type="button" class="pmgr-btn is-primary" data-act="flow-apply"${dis || (dupe || same ? " disabled" : "")}>${p ? "업데이트 받기" : "패치 추가"}</button>`;
   const src = pkg.source;
   const lines = pkg.text.split("\n").length;
   return `
-        <div class="pm-flow-title"><strong>${esc(p ? p.name : info.name)}</strong><span class="pm-ver">${esc(pkg.file)}</span></div>
-        <div class="pm-flow-meta">${src.kind === "github" ? `${icon("github", 13)}<span>${esc(src.repo)}</span><span class="pm-mono">${esc(src.path)} @ ${esc(src.ref.slice(0, 10))}</span>` : `${icon("fileCode", 13)}<span>${esc(src.fileName)}</span>`}</div>
-        <div class="pm-flow-caps"><span class="pm-badge">${kb(pkg.size)} · ${lines}줄</span><span class="pm-badge pm-mono">sha256 ${esc(shortHash(pkg.hash))}</span>${info.restore ? `<span class="pm-badge">${icon("undo", 11)}되돌리기 지원</span>` : ""}</div>
-        ${info.description ? `<p class="pm-flow-desc">${esc(info.description)}</p>` : ""}
+        <div class="pmgr-flow-title"><strong>${esc(p ? p.name : info.name)}</strong><span class="pmgr-ver">${esc(pkg.file)}</span></div>
+        <div class="pmgr-flow-meta">${src.kind === "github" ? `${icon("github", 13)}<span>${esc(src.repo)}</span><span class="pmgr-mono">${esc(src.path)} @ ${esc(src.ref.slice(0, 10))}</span>` : `${icon("fileCode", 13)}<span>${esc(src.fileName)}</span>`}</div>
+        <div class="pmgr-flow-caps"><span class="pmgr-badge">${kb(pkg.size)} · ${lines}줄</span><span class="pmgr-badge pmgr-mono">sha256 ${esc(shortHash(pkg.hash))}</span>${info.restore ? `<span class="pmgr-badge">${icon("undo", 11)}되돌리기 지원</span>` : ""}</div>
+        ${info.description ? `<p class="pmgr-flow-desc">${esc(info.description)}</p>` : ""}
         ${
           !p
-            ? `<label class="pm-flow-input">${icon("package", 14)}<input data-flow-target list="pm-targets" value="${esc(target)}" placeholder="대상 패키지 ID (예: gacha-forge)" spellcheck="false" autocomplete="off"></label>
-               <datalist id="pm-targets">${targetOptions()}</datalist>
-               ${t ? `<p class="pm-hint">${esc(t.name)} ${esc(t.version)} 설치됨</p>` : ""}
-               <label class="pm-opt"><input type="checkbox" data-flow-applied${flow.alreadyApplied ? " checked" : ""}><span><strong>이미 적용해 두었습니다</strong><span>예전에 직접 node로 실행해 둔 패치라면 켜 주십시오. 지금 설치 상태를 적용됨으로 기록합니다.</span></span></label>`
+            ? `<label class="pmgr-flow-input">${icon("package", 14)}<input data-flow-target list="pmgr-targets" value="${esc(target)}" placeholder="대상 패키지 ID (예: gacha-forge)" spellcheck="false" autocomplete="off"></label>
+               <datalist id="pmgr-targets">${targetOptions()}</datalist>
+               ${t ? `<p class="pmgr-hint">${esc(t.name)} ${esc(t.version)} 설치됨</p>` : ""}
+               <label class="pmgr-opt"><input type="checkbox" data-flow-applied${flow.alreadyApplied ? " checked" : ""}><span><strong>이미 적용해 두었습니다</strong><span>예전에 직접 node로 실행해 둔 패치라면 켜 주십시오. 지금 설치 상태를 적용됨으로 기록합니다.</span></span></label>`
             : ""
         }
-        ${notes.map(([kind, text]) => `<div class="pm-flow-note is-${kind}">${esc(text)}</div>`).join("")}
-        <details class="pm-code" data-code="flow"><summary>코드 보기 · ${esc(pkg.file)}</summary><pre>${esc(pkg.text)}</pre></details>
-        <div class="pm-flow-actions">${primary}<button type="button" class="pm-btn is-ghost" data-act="flow-cancel">취소</button></div>`;
+        ${notes.map(([kind, text]) => `<div class="pmgr-flow-note is-${kind}">${esc(text)}</div>`).join("")}
+        <details class="pmgr-code" data-code="flow"><summary>코드 보기 · ${esc(pkg.file)}</summary><pre>${esc(pkg.text)}</pre></details>
+        <div class="pmgr-flow-actions">${primary}<button type="button" class="pmgr-btn is-ghost" data-act="flow-cancel">취소</button></div>`;
 }
 
 function renderFlow(flow) {
   const p = flow.target ? patchOf(flow.target) : null;
   const dis = flow.busy ? " disabled" : "";
-  const cancel = `<button type="button" class="pm-btn is-ghost" data-act="flow-cancel">취소</button>`;
+  const cancel = `<button type="button" class="pmgr-btn is-ghost" data-act="flow-cancel">취소</button>`;
   let body = "";
   if (flow.step === "url") {
     const local = flow.target
       ? ""
-      : `<div class="pm-flow-local">
-                <button type="button" class="pm-btn" data-act="import-file" title=".mjs, .js, .cjs · 여러 개 골라도 됩니다"${dis}>${icon("fileCode", 13)}파일에서</button>
-                <button type="button" class="pm-btn" data-act="import-folder" title="폴더 안의 패치 스크립트를 모두 찾습니다"${dis}>${icon("folder", 13)}폴더에서</button>
+      : `<div class="pmgr-flow-local">
+                <button type="button" class="pmgr-btn" data-act="import-file" title=".mjs, .js, .cjs · 여러 개 골라도 됩니다"${dis}>${icon("fileCode", 13)}파일에서</button>
+                <button type="button" class="pmgr-btn" data-act="import-folder" title="폴더 안의 패치 스크립트를 모두 찾습니다"${dis}>${icon("folder", 13)}폴더에서</button>
             </div>
-            <p class="pm-hint">이미 받아 둔 패치가 있으면 그 폴더를 고르십시오(예: Downloads 안의 확장 폴더). patch/ 폴더의 스크립트를 모두 찾아 한 번에 추가합니다.</p>
-            <div class="pm-flow-or">또는 GitHub 저장소</div>`;
+            <p class="pmgr-hint">이미 받아 둔 패치가 있으면 그 폴더를 고르십시오(예: Downloads 안의 확장 폴더). patch/ 폴더의 스크립트를 모두 찾아 한 번에 추가합니다.</p>
+            <div class="pmgr-flow-or">또는 GitHub 저장소</div>`;
     body = `${local}
-            <label class="pm-flow-input">${icon("github", 14)}<input data-flow-url value="${esc(flow.url)}" placeholder="https://github.com/소유자/저장소" spellcheck="false" autocomplete="off"></label>
-            <div class="pm-flow-actions"><button type="button" class="pm-btn is-primary" data-act="flow-find"${dis}>${icon("search", 13)}패치 찾기</button>${flow.target ? cancel : ""}</div>
-            <p class="pm-hint">공개 저장소만 지원합니다. patch/ 폴더의 스크립트나 이름에 patch가 들어간 .mjs를 찾습니다. 파일 주소(…/blob/main/patch/apply-patch.mjs)를 넣어도 됩니다.</p>`;
+            <label class="pmgr-flow-input">${icon("github", 14)}<input data-flow-url value="${esc(flow.url)}" placeholder="https://github.com/소유자/저장소" spellcheck="false" autocomplete="off"></label>
+            <div class="pmgr-flow-actions"><button type="button" class="pmgr-btn is-primary" data-act="flow-find"${dis}>${icon("search", 13)}패치 찾기</button>${flow.target ? cancel : ""}</div>
+            <p class="pmgr-hint">공개 저장소만 지원합니다. patch/ 폴더의 스크립트나 이름에 patch가 들어간 .mjs를 찾습니다. 파일 주소(…/blob/main/patch/apply-patch.mjs)를 넣어도 됩니다.</p>`;
   } else if (flow.step === "choose") {
     const snap = flow.snapshot;
     body = `
-            <div class="pm-flow-meta">${icon("github", 13)}<span>${esc(snap.repo)}</span><span class="pm-mono">${esc(snap.sha.slice(0, 10))}</span></div>
-            <label class="pm-select is-block"><select data-flow-choice aria-label="패치 스크립트">${snap.choices.map((c, i) => `<option value="${i}"${i === flow.choiceIndex ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select></label>
-            <div class="pm-flow-actions"><button type="button" class="pm-btn is-primary" data-act="flow-load"${dis}>내용 확인</button><button type="button" class="pm-btn is-ghost" data-act="flow-back">다른 주소</button>${flow.target ? cancel : ""}</div>`;
+            <div class="pmgr-flow-meta">${icon("github", 13)}<span>${esc(snap.repo)}</span><span class="pmgr-mono">${esc(snap.sha.slice(0, 10))}</span></div>
+            <label class="pmgr-select is-block"><select data-flow-choice aria-label="패치 스크립트">${snap.choices.map((c, i) => `<option value="${i}"${i === flow.choiceIndex ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select></label>
+            <div class="pmgr-flow-actions"><button type="button" class="pmgr-btn is-primary" data-act="flow-load"${dis}>내용 확인</button><button type="button" class="pmgr-btn is-ghost" data-act="flow-back">다른 주소</button>${flow.target ? cancel : ""}</div>`;
   } else if (flow.step === "preview") {
     body = previewHtml(flow, p);
   } else if (flow.step === "multi") {
     const ok = flow.items.filter((x) => x.pkg && !x.dupe);
     const picked = ok.filter((x) => x.checked).length;
     body = `
-            <div class="pm-side-title">찾은 패치 · ${flow.items.length}개</div>
-            <div class="pm-pick-list">${flow.items
+            <div class="pmgr-side-title">찾은 패치 · ${flow.items.length}개</div>
+            <div class="pmgr-pick-list">${flow.items
               .map((x, i) => {
                 const info = x.pkg?.info;
-                const state2 = x.error ? `<span class="pm-err">${esc(x.error)}</span>` : x.dupe ? `<span class="pm-hint">이미 있음: ${esc(x.dupe)}</span>` : "";
-                return `<label class="pm-pick${x.pkg && !x.dupe ? "" : " is-off"}">
+                const state2 = x.error ? `<span class="pmgr-err">${esc(x.error)}</span>` : x.dupe ? `<span class="pmgr-hint">이미 있음: ${esc(x.dupe)}</span>` : "";
+                return `<label class="pmgr-pick${x.pkg && !x.dupe ? "" : " is-off"}">
                     <input type="checkbox" data-pick="${i}"${x.checked ? " checked" : ""}${x.pkg && !x.dupe ? "" : " disabled"}>
-                    <span class="pm-pick-main"><strong>${esc(info?.name || x.path)}</strong><span class="pm-mono">${esc(x.path)}</span>${state2}</span>
-                    ${info ? `<span class="pm-chip">${icon("package", 11)}${esc(info.target || "대상 미지정")}</span>` : ""}
+                    <span class="pmgr-pick-main"><strong>${esc(info?.name || x.path)}</strong><span class="pmgr-mono">${esc(x.path)}</span>${state2}</span>
+                    ${info ? `<span class="pmgr-chip">${icon("package", 11)}${esc(info.target || "대상 미지정")}</span>` : ""}
                 </label>`;
               })
               .join("")}</div>
-            <div class="pm-flow-note is-warn">패치 스크립트는 이 컴퓨터에서 node로 실행되어 파일을 고칩니다. 믿을 수 있는 것만 추가해 주십시오. 추가한 뒤 상세 패널에서 코드를 볼 수 있습니다.</div>
-            <div class="pm-flow-note is-hint">예전에 이미 적용해 둔 패치라면, 추가한 뒤 [검사]에서 마리나라 data 폴더를 고르면 들어 있는 패치를 찾아 적용됨으로 표시합니다.</div>
-            <div class="pm-flow-actions"><button type="button" class="pm-btn is-primary" data-act="flow-add-picked"${dis || (picked ? "" : " disabled")}>${icon("plus", 13)}${picked}개 추가</button><button type="button" class="pm-btn is-ghost" data-act="flow-cancel">취소</button></div>`;
+            <div class="pmgr-flow-note is-warn">패치 스크립트는 이 컴퓨터에서 node로 실행되어 파일을 고칩니다. 믿을 수 있는 것만 추가해 주십시오. 추가한 뒤 상세 패널에서 코드를 볼 수 있습니다.</div>
+            <div class="pmgr-flow-note is-hint">예전에 이미 적용해 둔 패치라면, 추가한 뒤 [검사]에서 마리나라 data 폴더를 고르면 들어 있는 패치를 찾아 적용됨으로 표시합니다.</div>
+            <div class="pmgr-flow-actions"><button type="button" class="pmgr-btn is-primary" data-act="flow-add-picked"${dis || (picked ? "" : " disabled")}>${icon("plus", 13)}${picked}개 추가</button><button type="button" class="pmgr-btn is-ghost" data-act="flow-cancel">취소</button></div>`;
   } else if (flow.step === "done") {
     const ids = flow.resultIds || [flow.resultId];
     body = `
-            <div class="pm-flow-note is-ok">${icon("circleCheck", 14)}패치 ${ids.length}개를 추가했습니다. 실행 목록에 들어갔습니다.</div>
-            <div class="pm-flow-actions">
-                <button type="button" class="pm-btn is-primary" data-act="run-open">${icon("terminal", 13)}실행 파일 받으러 가기</button>
-                <button type="button" class="pm-btn" data-act="scan-open">${icon("folderSearch", 13)}이미 적용됐는지 검사</button>
-                ${ids.length === 1 ? `<button type="button" class="pm-btn" data-act="flow-show" data-id="${esc(ids[0])}">이 패치 보기</button>` : ""}
-                <button type="button" class="pm-btn is-ghost" data-act="flow-again">다른 패치 추가</button>
+            <div class="pmgr-flow-note is-ok">${icon("circleCheck", 14)}패치 ${ids.length}개를 추가했습니다. 실행 목록에 들어갔습니다.</div>
+            <div class="pmgr-flow-actions">
+                <button type="button" class="pmgr-btn is-primary" data-act="run-open">${icon("terminal", 13)}실행 파일 받으러 가기</button>
+                <button type="button" class="pmgr-btn" data-act="scan-open">${icon("folderSearch", 13)}이미 적용됐는지 검사</button>
+                ${ids.length === 1 ? `<button type="button" class="pmgr-btn" data-act="flow-show" data-id="${esc(ids[0])}">이 패치 보기</button>` : ""}
+                <button type="button" class="pmgr-btn is-ghost" data-act="flow-again">다른 패치 추가</button>
             </div>`;
   }
-  return `<div class="pm-flow">${body}${flowStatusHtml(flow)}</div>`;
+  return `<div class="pmgr-flow">${body}${flowStatusHtml(flow)}</div>`;
 }
 
 function addViewHtml() {
-  return `<div class="pm-toolbar">
-            <button type="button" class="pm-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
-            <strong class="pm-toolbar-title">${icon("plus", 14)}패치 추가</strong>
+  return `<div class="pmgr-toolbar">
+            <button type="button" class="pmgr-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
+            <strong class="pmgr-toolbar-title">${icon("plus", 14)}패치 추가</strong>
         </div>
-        <div class="pm-scroll"><div class="pm-flow-wrap">${renderFlow(state.flow)}</div></div>`;
+        <div class="pmgr-scroll"><div class="pmgr-flow-wrap">${renderFlow(state.flow)}</div></div>`;
 }
 
 // ----- 실행 화면 -----
@@ -2283,14 +2293,14 @@ function runViewHtml() {
     .map((p, i) => {
       const key = statusOf(p);
       const skip = mode === "restore" && !p.restore;
-      return `<div class="pm-run-row${skip ? " is-skip" : ""}">
-            <span class="pm-order">${i + 1}</span>
-            <div class="pm-run-main"><strong>${esc(p.name)}</strong><span>${esc(p.file)}${p.target ? ` · ${esc(targetLabel(p.target))}` : ""}${skip ? " · 되돌리기 없음, 건너뜀" : ""}</span></div>
-            <span class="pm-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${STATUS[key].label}</span>
-            <span class="pm-run-tools">
-                <button type="button" class="pm-act" data-act="move-up" data-id="${esc(p.id)}"${i ? "" : " disabled"} title="앞으로" aria-label="앞으로">${icon("chevronUp", 13)}</button>
-                <button type="button" class="pm-act" data-act="move-down" data-id="${esc(p.id)}"${i < list.length - 1 ? "" : " disabled"} title="뒤로" aria-label="뒤로">${icon("chevronDown", 13)}</button>
-                <button type="button" class="pm-act" data-act="include" data-id="${esc(p.id)}" title="실행 목록에서 빼기" aria-label="실행 목록에서 빼기">${icon("x", 13)}</button>
+      return `<div class="pmgr-run-row${skip ? " is-skip" : ""}">
+            <span class="pmgr-order">${i + 1}</span>
+            <div class="pmgr-run-main"><strong>${esc(p.name)}</strong><span>${esc(p.file)}${p.target ? ` · ${esc(targetLabel(p.target))}` : ""}${skip ? " · 되돌리기 없음, 건너뜀" : ""}</span></div>
+            <span class="pmgr-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 11)}${STATUS[key].label}</span>
+            <span class="pmgr-run-tools">
+                <button type="button" class="pmgr-act" data-act="move-up" data-id="${esc(p.id)}"${i ? "" : " disabled"} title="앞으로" aria-label="앞으로">${icon("chevronUp", 13)}</button>
+                <button type="button" class="pmgr-act" data-act="move-down" data-id="${esc(p.id)}"${i < list.length - 1 ? "" : " disabled"} title="뒤로" aria-label="뒤로">${icon("chevronDown", 13)}</button>
+                <button type="button" class="pmgr-act" data-act="include" data-id="${esc(p.id)}" title="실행 목록에서 빼기" aria-label="실행 목록에서 빼기">${icon("x", 13)}</button>
             </span>
         </div>`;
     })
@@ -2298,36 +2308,36 @@ function runViewHtml() {
   const stale = list.filter((p) => ["stale", "off"].includes(statusOf(p))).length;
   const port = localPort();
   const cmd = runCommand();
-  return `<div class="pm-toolbar">
-            <button type="button" class="pm-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
-            <strong class="pm-toolbar-title">${icon("terminal", 14)}패치 실행</strong>
+  return `<div class="pmgr-toolbar">
+            <button type="button" class="pmgr-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
+            <strong class="pmgr-toolbar-title">${icon("terminal", 14)}패치 실행</strong>
         </div>
-        <div class="pm-scroll"><div class="pm-flow-wrap pm-settings">
+        <div class="pmgr-scroll"><div class="pmgr-flow-wrap pmgr-settings">
             ${runBanner()}
-            <div class="pm-seg pm-run-mode" role="group" aria-label="실행 방식">
+            <div class="pmgr-seg pmgr-run-mode" role="group" aria-label="실행 방식">
                 <button type="button" class="${mode === "apply" ? "is-active" : ""}" data-act="run-mode" data-v="apply">${icon("wrench", 13)}적용</button>
                 <button type="button" class="${mode === "restore" ? "is-active" : ""}" data-act="run-mode" data-v="restore">${icon("undo", 13)}되돌리기</button>
             </div>
-            <div class="pm-side-title">실행 목록 · ${runnable.length}개${mode === "apply" && stale ? ` (적용 필요 ${stale}개)` : ""}</div>
-            ${rows || `<p class="pm-hint">실행 목록이 비어 있습니다. 패치 카드의 전원 버튼으로 넣을 수 있습니다.</p>`}
-            ${excluded ? `<p class="pm-hint">실행 목록에서 뺀 패치 ${excluded}개는 들어가지 않습니다.</p>` : ""}
-            <p class="pm-hint">${mode === "restore" ? "되돌리기는 목록을 거꾸로, 뒤에서부터 실행합니다." : "위에서부터 순서대로 실행합니다. 같은 파일을 고치는 패치는 순서가 중요할 수 있습니다."}</p>
-            <label class="pm-flow-input">${icon("folder", 14)}<input data-pref-text="dataDir" value="${esc(state.prefs.dataDir)}" placeholder="마리나라 data 폴더 (비우면 실행한 폴더에서 찾음)" spellcheck="false" autocomplete="off"></label>
-            <div class="pm-flow-actions">
-                <button type="button" class="pm-btn is-primary" data-act="run-download"${runnable.length ? "" : " disabled"}>${icon("download", 13)}${mode === "restore" ? "되돌리기 파일 받기" : "실행 파일 받기"}</button>
+            <div class="pmgr-side-title">실행 목록 · ${runnable.length}개${mode === "apply" && stale ? ` (적용 필요 ${stale}개)` : ""}</div>
+            ${rows || `<p class="pmgr-hint">실행 목록이 비어 있습니다. 패치 카드의 전원 버튼으로 넣을 수 있습니다.</p>`}
+            ${excluded ? `<p class="pmgr-hint">실행 목록에서 뺀 패치 ${excluded}개는 들어가지 않습니다.</p>` : ""}
+            <p class="pmgr-hint">${mode === "restore" ? "되돌리기는 목록을 거꾸로, 뒤에서부터 실행합니다." : "위에서부터 순서대로 실행합니다. 같은 파일을 고치는 패치는 순서가 중요할 수 있습니다."}</p>
+            <label class="pmgr-flow-input">${icon("folder", 14)}<input data-pref-text="dataDir" value="${esc(state.prefs.dataDir)}" placeholder="마리나라 data 폴더 (비우면 실행한 폴더에서 찾음)" spellcheck="false" autocomplete="off"></label>
+            <div class="pmgr-flow-actions">
+                <button type="button" class="pmgr-btn is-primary" data-act="run-download"${runnable.length ? "" : " disabled"}>${icon("download", 13)}${mode === "restore" ? "되돌리기 파일 받기" : "실행 파일 받기"}</button>
             </div>
             ${autoSectionHtml(mode, runnable)}
-            <div class="pm-side-title">직접 실행 (도우미 없이)</div>
-            <p class="pm-hint">이 관리자는 마리나라 안에서 돌아가므로 마리나라가 켜져 있을 때 씁니다. 하지만 패치는 마리나라가 꺼진 동안에 들어가야 합니다(켜져 있으면 마리나라가 설치 기록을 옛 해시로 덮어씁니다). 그래서 파일은 지금 받고, 실행은 마리나라를 끌 때 합니다.</p>
-            <ol class="pm-steps">
+            <div class="pmgr-side-title">직접 실행 (도우미 없이)</div>
+            <p class="pmgr-hint">이 관리자는 마리나라 안에서 돌아가므로 마리나라가 켜져 있을 때 씁니다. 하지만 패치는 마리나라가 꺼진 동안에 들어가야 합니다(켜져 있으면 마리나라가 설치 기록을 옛 해시로 덮어씁니다). 그래서 파일은 지금 받고, 실행은 마리나라를 끌 때 합니다.</p>
+            <ol class="pmgr-steps">
                 <li><strong>${esc(BUNDLE_NAME)}</strong>을(를) 받습니다(마리나라가 켜진 지금). 패치가 모두 이 파일 하나에 들어 있습니다.</li>
                 <li>${state.prefs.dataDir.trim() ? "아무 폴더에서나" : "마리나라 엔진 폴더에서"} 터미널을 열고 실행합니다(Node.js 필요).${mode === "restore" ? " 받은 파일은 되돌리기용이라 따로 --restore를 붙이지 않아도 됩니다." : ""}
-                    <div class="pm-cmd"><code>${esc(cmd)}</code><button type="button" class="pm-icon-btn" data-act="copy" data-v="${esc(cmd)}" title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>
-                    <span class="pm-hint">받은 파일이 다른 폴더에 있으면 그 경로를 적습니다. 예: node "C:\\Users\\나\\Downloads\\${esc(BUNDLE_NAME)}" · 같은 이름이 있으면 브라우저가 "(1)"을 붙일 수 있습니다.</span></li>
+                    <div class="pmgr-cmd"><code>${esc(cmd)}</code><button type="button" class="pmgr-icon-btn" data-act="copy" data-v="${esc(cmd)}" title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>
+                    <span class="pmgr-hint">받은 파일이 다른 폴더에 있으면 그 경로를 적습니다. 예: node "C:\\Users\\나\\Downloads\\${esc(BUNDLE_NAME)}" · 같은 이름이 있으면 브라우저가 "(1)"을 붙일 수 있습니다.</span></li>
                 <li><strong>마리나라를 끕니다</strong>(런처 창을 닫거나 Ctrl+C). ${state.prefs.portCheck ? "마리나라가 아직 켜져 있으면 실행 파일이 기다리다가, 꺼진 것을 확인하면(8초 동안 꺼져 있으면) 바로 패치합니다. 그러니 2번과 3번은 순서가 바뀌어도 됩니다." : "기다리기를 꺼 두었으므로, 마리나라를 먼저 끈 뒤 2번을 실행해 주십시오."} 설정 → 고급의 <strong>서버 재시작</strong>은 끄자마자 바로 다시 켜서 패치할 틈이 없으므로 이 용도로는 쓸 수 없습니다.</li>
                 <li>터미널에 "결과: 성공"이 뜨면 마리나라를 다시 켜고 이 관리자를 엽니다. 설치 기록의 해시가 바뀐 것을 보고 적용 여부를 자동으로 표시합니다.</li>
             </ol>
-            <p class="pm-hint">그 밖의 옵션: --list(목록만 보기), --no-wait(켜져 있으면 기다리지 않고 그만두기), --force(켜져 있어도 바로 실행, 권장하지 않음), 끝에 data 폴더 경로.</p>
+            <p class="pmgr-hint">그 밖의 옵션: --list(목록만 보기), --no-wait(켜져 있으면 기다리지 않고 그만두기), --force(켜져 있어도 바로 실행, 권장하지 않음), 끝에 data 폴더 경로.</p>
         </div></div>`;
 }
 
@@ -2341,37 +2351,37 @@ function autoSectionHtml(mode, runnable) {
   const startCmd = `node ${HELPER_NAME}`;
   const result = h?.result && (!auto.jobId || h.doneJob === auto.jobId) ? h.result : null;
   const resultHtml = result
-    ? `<div class="pm-flow-note is-${result.ok ? "ok" : "error"}">${icon(result.ok ? "circleCheck" : "circleX", 13)}<span>마지막 자동 적용 · ${fmtTime(result.at)} · ${result.ok ? "성공" : "실패"}${result.items?.length ? ` · ${result.items.map((x) => `${esc(x.name)} ${x.ok ? "✓" : "✗"}`).join(", ")}` : ""}</span></div>
-       ${result.log ? `<details class="pm-code"><summary>도우미 기록 보기</summary><pre>${esc(result.log)}</pre></details>` : ""}`
+    ? `<div class="pmgr-flow-note is-${result.ok ? "ok" : "error"}">${icon(result.ok ? "circleCheck" : "circleX", 13)}<span>마지막 자동 적용 · ${fmtTime(result.at)} · ${result.ok ? "성공" : "실패"}${result.items?.length ? ` · ${result.items.map((x) => `${esc(x.name)} ${x.ok ? "✓" : "✗"}`).join(", ")}` : ""}</span></div>
+       ${result.log ? `<details class="pmgr-code"><summary>도우미 기록 보기</summary><pre>${esc(result.log)}</pre></details>` : ""}`
     : "";
-  const guide = `<ol class="pm-steps">
-        <li><button type="button" class="pm-btn" data-act="helper-download">${icon("download", 13)}${esc(HELPER_NAME)} 받기</button> (한 번만 하면 됩니다)</li>
+  const guide = `<ol class="pmgr-steps">
+        <li><button type="button" class="pmgr-btn" data-act="helper-download">${icon("download", 13)}${esc(HELPER_NAME)} 받기</button> (한 번만 하면 됩니다)</li>
         <li>마리나라가 돌아가는 컴퓨터의 <strong>마리나라 엔진 폴더</strong>(packages 폴더가 있는 곳)에 넣습니다. SSH로 쓰는 서버나 호스팅 서버라면 그 서버로 올립니다(예: scp, SFTP).</li>
         <li>마리나라를 평소 방법 대신 이 명령으로 켭니다. 처음 켜면 터미널에 <strong>연결 코드</strong>가 나옵니다.
-            <div class="pm-cmd"><code>${esc(startCmd)}</code><button type="button" class="pm-icon-btn" data-act="copy" data-v="${esc(startCmd)}" title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>
-            <span class="pm-hint">서버에서 systemd·pm2 같은 서비스로 돌린다면, 시작 명령(pnpm start)을 이 명령으로 바꾸면 됩니다. 업데이트·빌드는 평소처럼 런처나 pnpm으로 하고, 켜는 것만 도우미로 합니다. 연결 코드를 잊었으면 <code>${esc(startCmd)} --code</code>.</span></li>
+            <div class="pmgr-cmd"><code>${esc(startCmd)}</code><button type="button" class="pmgr-icon-btn" data-act="copy" data-v="${esc(startCmd)}" title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>
+            <span class="pmgr-hint">서버에서 systemd·pm2 같은 서비스로 돌린다면, 시작 명령(pnpm start)을 이 명령으로 바꾸면 됩니다. 업데이트·빌드는 평소처럼 런처나 pnpm으로 하고, 켜는 것만 도우미로 합니다. 연결 코드를 잊었으면 <code>${esc(startCmd)} --code</code>.</span></li>
         <li>연결 코드를 위의 "연결 코드" 칸에 넣습니다. 이제부터는 이 화면의 [자동 적용]만 누르면 됩니다.</li>
     </ol>
-    <p class="pm-hint">Docker로 돌리는 마리나라는 재시작이 컨테이너째 다시 켜지는 방식이라 도우미를 쓸 수 없습니다. 컨테이너를 멈추고 같은 data 볼륨으로 실행 파일을 돌려 주십시오.</p>`;
-  return `<div class="pm-side-title">자동 적용 (서버 도우미)</div>
-        <p class="pm-hint">패치는 마리나라가 꺼져 있을 때만 넣을 수 있습니다. 서버 컴퓨터에 작은 도우미를 한 번 깔아 두면, [자동 적용]을 누를 때 도우미가 마리나라를 정상 재시작하면서 꺼진 그 틈에 패치를 넣고 다시 켭니다. 터미널을 다시 열지 않아도 되고, 집 컴퓨터든 SSH 서버든 호스팅 서버든 똑같이 됩니다.</p>
-        <div class="pm-opt is-static pm-helper">
+    <p class="pmgr-hint">Docker로 돌리는 마리나라는 재시작이 컨테이너째 다시 켜지는 방식이라 도우미를 쓸 수 없습니다. 컨테이너를 멈추고 같은 data 볼륨으로 실행 파일을 돌려 주십시오.</p>`;
+  return `<div class="pmgr-side-title">자동 적용 (서버 도우미)</div>
+        <p class="pmgr-hint">패치는 마리나라가 꺼져 있을 때만 넣을 수 있습니다. 서버 컴퓨터에 작은 도우미를 한 번 깔아 두면, [자동 적용]을 누를 때 도우미가 마리나라를 정상 재시작하면서 꺼진 그 틈에 패치를 넣고 다시 켭니다. 터미널을 다시 열지 않아도 되고, 집 컴퓨터든 SSH 서버든 호스팅 서버든 똑같이 됩니다.</p>
+        <div class="pmgr-opt is-static pmgr-helper">
             <span><strong>${h?.version ? `${icon("circleCheck", 13)} 도우미 확인됨` : `${icon("circle", 13)} 도우미가 아직 연결되지 않았습니다`}</strong>
             <span>${h?.version ? `${esc(h.engine || "")} · 마지막 신호 ${fmtTime(h.at)} · v${esc(h.version)}` : "도우미로 마리나라를 켜면 몇 초 뒤 여기에 표시됩니다. 표시가 없어도 연결 코드만 맞으면 자동 적용을 시도할 수 있습니다."}</span></span>
             ${
               code
-                ? `<div class="pm-gh-actions"><span class="pm-hint">${icon("check", 12)} 연결 코드가 이 브라우저에 저장되어 있습니다.</span><button type="button" class="pm-btn is-ghost" data-act="helper-code-clear">코드 바꾸기</button></div>`
-                : `<label class="pm-flow-input">${icon("link", 14)}<input data-helper-code placeholder="연결 코드 (예: 1a2b-3c4d-…)" spellcheck="false" autocomplete="off"></label>
-                   <div class="pm-gh-actions"><button type="button" class="pm-btn" data-act="helper-code-save">연결 코드 저장</button><span class="pm-hint">이 브라우저에만 저장되고 서버에는 보내지 않습니다.</span></div>`
+                ? `<div class="pmgr-gh-actions"><span class="pmgr-hint">${icon("check", 12)} 연결 코드가 이 브라우저에 저장되어 있습니다.</span><button type="button" class="pmgr-btn is-ghost" data-act="helper-code-clear">코드 바꾸기</button></div>`
+                : `<label class="pmgr-flow-input">${icon("link", 14)}<input data-helper-code placeholder="연결 코드 (예: 1a2b-3c4d-…)" spellcheck="false" autocomplete="off"></label>
+                   <div class="pmgr-gh-actions"><button type="button" class="pmgr-btn" data-act="helper-code-save">연결 코드 저장</button><span class="pmgr-hint">이 브라우저에만 저장되고 서버에는 보내지 않습니다.</span></div>`
             }
-            <div class="pm-flow-actions">
-                <button type="button" class="pm-btn is-primary" data-act="auto-run"${busy || !code || !runnable.length ? " disabled" : ""}>${icon(busy ? "loader" : mode === "restore" ? "undo" : "wrench", 13)}${busy ? esc(busy) : `${mode === "restore" ? "자동으로 되돌리기" : "자동 적용"} · ${runnable.length}개`}</button>
+            <div class="pmgr-flow-actions">
+                <button type="button" class="pmgr-btn is-primary" data-act="auto-run"${busy || !code || !runnable.length ? " disabled" : ""}>${icon(busy ? "loader" : mode === "restore" ? "undo" : "wrench", 13)}${busy ? esc(busy) : `${mode === "restore" ? "자동으로 되돌리기" : "자동 적용"} · ${runnable.length}개`}</button>
             </div>
-            ${auto.error ? `<div class="pm-flow-status is-error">${icon("circleX", 13)}${esc(auto.error)}</div>` : ""}
-            ${busy ? '<p class="pm-hint">마리나라가 잠깐 꺼졌다 켜지는 동안 화면 연결이 끊길 수 있습니다. 페이지를 새로 고쳐도 패치는 계속되고, 다시 열면 결과가 보입니다.</p>' : ""}
+            ${auto.error ? `<div class="pmgr-flow-status is-error">${icon("circleX", 13)}${esc(auto.error)}</div>` : ""}
+            ${busy ? '<p class="pmgr-hint">마리나라가 잠깐 꺼졌다 켜지는 동안 화면 연결이 끊길 수 있습니다. 페이지를 새로 고쳐도 패치는 계속되고, 다시 열면 결과가 보입니다.</p>' : ""}
             ${resultHtml}
         </div>
-        ${h?.version ? `<details class="pm-code"><summary>도우미 설치 방법</summary><div class="pm-guide">${guide}</div></details>` : guide}`;
+        ${h?.version ? `<details class="pmgr-code"><summary>도우미 설치 방법</summary><div class="pmgr-guide">${guide}</div></details>` : guide}`;
 }
 
 // ----- 검사 화면: 들어 있는 패치 · 백업본 -----
@@ -2394,12 +2404,12 @@ function scanViewHtml() {
         const unknown = unknownMarkers(pkg);
         const lines = mine.map((p) => {
           const names = markersOf(p);
-          if (!names.length) return `<li><span class="pm-status is-off">${icon("circle", 11)}알 수 없음</span>${esc(p.name)} <span class="pm-hint">· 표식을 남기지 않는 패치라 확인할 수 없습니다</span></li>`;
+          if (!names.length) return `<li><span class="pmgr-status is-off">${icon("circle", 11)}알 수 없음</span>${esc(p.name)} <span class="pmgr-hint">· 표식을 남기지 않는 패치라 확인할 수 없습니다</span></li>`;
           const present = names.some((n) => pkg.markers.includes(n));
-          return `<li><span class="pm-status is-${present ? "on" : "off"}">${icon(present ? "circleCheck" : "circle", 11)}${present ? "들어 있음" : "없음"}</span>${esc(p.name)}</li>`;
+          return `<li><span class="pmgr-status is-${present ? "on" : "off"}">${icon(present ? "circleCheck" : "circle", 11)}${present ? "들어 있음" : "없음"}</span>${esc(p.name)}</li>`;
         });
-        for (const n of unknown) lines.push(`<li><span class="pm-status is-pending">${icon("shieldAlert", 11)}관리 안 함</span><span class="pm-mono">${esc(n)}</span> <span class="pm-hint">· 이 관리자에 없는 패치입니다. 그 패치 파일을 [패치 추가]로 불러오면 연결됩니다.</span></li>`);
-        return `<div class="pm-scan-pkg"><strong>${icon("package", 13)}${esc(pkg.name)} <span class="pm-ver">${esc(pkg.version)}</span></strong><ul>${lines.join("") || '<li class="pm-hint">패치 흔적이 없습니다.</li>'}</ul></div>`;
+        for (const n of unknown) lines.push(`<li><span class="pmgr-status is-pending">${icon("shieldAlert", 11)}관리 안 함</span><span class="pmgr-mono">${esc(n)}</span> <span class="pmgr-hint">· 이 관리자에 없는 패치입니다. 그 패치 파일을 [패치 추가]로 불러오면 연결됩니다.</span></li>`);
+        return `<div class="pmgr-scan-pkg"><strong>${icon("package", 13)}${esc(pkg.name)} <span class="pmgr-ver">${esc(pkg.version)}</span></strong><ul>${lines.join("") || '<li class="pmgr-hint">패치 흔적이 없습니다.</li>'}</ul></div>`;
       })
       .join("");
     const total = scan.backups.reduce((n, b) => n + b.size, 0);
@@ -2407,49 +2417,49 @@ function scanViewHtml() {
     const backupRows = scan.backups
       .map((b) => {
         const confirming = state.confirmBackup === b.path;
-        return `<div class="pm-run-row">
-            <div class="pm-run-main"><strong class="pm-mono">${esc(b.path.split("/").pop())}</strong><span>${esc(b.path)} · ${kb(b.size)} · ${fmtDate(b.modified)}${b.current ? "" : " · 지금 쓰지 않는 옛 버전"}</span></div>
-            ${scan.writable ? `<button type="button" class="pm-btn${confirming ? " is-danger" : " is-ghost"}" data-act="backup-del" data-v="${esc(b.path)}"${busy ? " disabled" : ""}>${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>` : ""}
+        return `<div class="pmgr-run-row">
+            <div class="pmgr-run-main"><strong class="pmgr-mono">${esc(b.path.split("/").pop())}</strong><span>${esc(b.path)} · ${kb(b.size)} · ${fmtDate(b.modified)}${b.current ? "" : " · 지금 쓰지 않는 옛 버전"}</span></div>
+            ${scan.writable ? `<button type="button" class="pmgr-btn${confirming ? " is-danger" : " is-ghost"}" data-act="backup-del" data-v="${esc(b.path)}"${busy ? " disabled" : ""}>${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>` : ""}
         </div>`;
       })
       .join("");
     body = `
-            ${summary.length ? `<div class="pm-flow-note is-ok">${icon("circleCheck", 14)}<span>${summary.map(esc).join("<br>")}</span></div>` : ""}
-            <p class="pm-hint">${fmtTime(scan.at)} 검사 · 설치 패키지 ${scan.packages.length}개</p>
-            <div class="pm-side-title">설치 패키지 속 패치</div>
-            ${pkgRows || '<p class="pm-hint">패치가 들어 있는 패키지가 없습니다.</p>'}
-            <div class="pm-side-title">패치 백업본 · ${scan.backups.length}개${scan.backups.length ? ` · ${kb(total)}` : ""}</div>
+            ${summary.length ? `<div class="pmgr-flow-note is-ok">${icon("circleCheck", 14)}<span>${summary.map(esc).join("<br>")}</span></div>` : ""}
+            <p class="pmgr-hint">${fmtTime(scan.at)} 검사 · 설치 패키지 ${scan.packages.length}개</p>
+            <div class="pmgr-side-title">설치 패키지 속 패치</div>
+            ${pkgRows || '<p class="pmgr-hint">패치가 들어 있는 패키지가 없습니다.</p>'}
+            <div class="pmgr-side-title">패치 백업본 · ${scan.backups.length}개${scan.backups.length ? ` · ${kb(total)}` : ""}</div>
             ${
               scan.backups.length
-                ? `<p class="pm-hint">패치가 처음 들어갈 때 남긴 원본 파일입니다(예: server.mjs.gmm-backup). 지워도 마리나라와 패치는 그대로 동작합니다. --restore를 지원하는 패치는 백업본 없이도 되돌릴 수 있지만, 지원하지 않는 패치는 백업본이 유일한 원본일 수 있습니다.</p>
+                ? `<p class="pmgr-hint">패치가 처음 들어갈 때 남긴 원본 파일입니다(예: server.mjs.gmm-backup). 지워도 마리나라와 패치는 그대로 동작합니다. --restore를 지원하는 패치는 백업본 없이도 되돌릴 수 있지만, 지원하지 않는 패치는 백업본이 유일한 원본일 수 있습니다.</p>
                    ${backupRows}
-                   <div class="pm-flow-actions">${
+                   <div class="pmgr-flow-actions">${
                      scan.writable
-                       ? `<button type="button" class="pm-btn is-danger" data-act="backup-del-all"${busy ? " disabled" : ""}>${icon("trash", 13)}${confirmAll ? `정말 ${scan.backups.length}개 모두 삭제` : "백업본 모두 삭제"}</button>`
-                       : `<button type="button" class="pm-btn is-primary" data-act="backup-clean-file">${icon("download", 13)}정리 파일 받기</button>`
+                       ? `<button type="button" class="pmgr-btn is-danger" data-act="backup-del-all"${busy ? " disabled" : ""}>${icon("trash", 13)}${confirmAll ? `정말 ${scan.backups.length}개 모두 삭제` : "백업본 모두 삭제"}</button>`
+                       : `<button type="button" class="pmgr-btn is-primary" data-act="backup-clean-file">${icon("download", 13)}정리 파일 받기</button>`
                    }</div>
                    ${
                      scan.writable
-                       ? `<p class="pm-hint">${scan.via === "helper" ? "서버에 있는 도우미가 지웁니다. 마리나라가 켜져 있어도 됩니다." : "삭제할 때 브라우저가 이 폴더를 수정해도 되는지 한 번 묻습니다."}</p>`
-                       : `<p class="pm-hint">이 브라우저는 폴더 속 파일을 직접 지울 수 없습니다(크롬·엣지는 가능). 정리 파일을 받아 마리나라 엔진 폴더에서 실행해 주십시오. 마리나라가 켜져 있어도 됩니다.</p>
-                          <div class="pm-cmd"><code>node "marinara-clean-backups.mjs"</code><button type="button" class="pm-icon-btn" data-act="copy" data-v='node "marinara-clean-backups.mjs"' title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>`
+                       ? `<p class="pmgr-hint">${scan.via === "helper" ? "서버에 있는 도우미가 지웁니다. 마리나라가 켜져 있어도 됩니다." : "삭제할 때 브라우저가 이 폴더를 수정해도 되는지 한 번 묻습니다."}</p>`
+                       : `<p class="pmgr-hint">이 브라우저는 폴더 속 파일을 직접 지울 수 없습니다(크롬·엣지는 가능). 정리 파일을 받아 마리나라 엔진 폴더에서 실행해 주십시오. 마리나라가 켜져 있어도 됩니다.</p>
+                          <div class="pmgr-cmd"><code>node "marinara-clean-backups.mjs"</code><button type="button" class="pmgr-icon-btn" data-act="copy" data-v='node "marinara-clean-backups.mjs"' title="복사" aria-label="명령 복사">${icon("copy", 13)}</button></div>`
                    }`
-                : '<p class="pm-hint">백업본이 없습니다.</p>'
+                : '<p class="pmgr-hint">백업본이 없습니다.</p>'
             }`;
   }
-  return `<div class="pm-toolbar">
-            <button type="button" class="pm-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
-            <strong class="pm-toolbar-title">${icon("folderSearch", 14)}검사 · 백업본</strong>
+  return `<div class="pmgr-toolbar">
+            <button type="button" class="pmgr-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
+            <strong class="pmgr-toolbar-title">${icon("folderSearch", 14)}검사 · 백업본</strong>
         </div>
-        <div class="pm-scroll"><div class="pm-flow-wrap pm-settings">
-            <p class="pm-hint">설치 패키지 파일 속에 어떤 패치가 실제로 들어 있는지와 패치가 남긴 백업본을 찾습니다. 예전에 직접 적용해 둔 패치도 여기서 찾아 적용됨으로 표시합니다.</p>
-            <div class="pm-flow-actions">
-                <button type="button" class="pm-btn${remote ? " is-primary" : ""}" data-act="scan-helper"${busy || !helperCode() ? " disabled" : ""}>${icon(busy ? "loader" : "terminal", 13)}서버에서 검사 (도우미)</button>
-                <button type="button" class="pm-btn${remote ? "" : " is-primary"}" data-act="scan-pick"${busy ? " disabled" : ""}>${icon(busy ? "loader" : "folderSearch", 13)}이 컴퓨터에서 폴더 고르기</button>
+        <div class="pmgr-scroll"><div class="pmgr-flow-wrap pmgr-settings">
+            <p class="pmgr-hint">설치 패키지 파일 속에 어떤 패치가 실제로 들어 있는지와 패치가 남긴 백업본을 찾습니다. 예전에 직접 적용해 둔 패치도 여기서 찾아 적용됨으로 표시합니다.</p>
+            <div class="pmgr-flow-actions">
+                <button type="button" class="pmgr-btn${remote ? " is-primary" : ""}" data-act="scan-helper"${busy || !helperCode() ? " disabled" : ""}>${icon(busy ? "loader" : "terminal", 13)}서버에서 검사 (도우미)</button>
+                <button type="button" class="pmgr-btn${remote ? "" : " is-primary"}" data-act="scan-pick"${busy ? " disabled" : ""}>${icon(busy ? "loader" : "folderSearch", 13)}이 컴퓨터에서 폴더 고르기</button>
             </div>
-            ${busy ? `<p class="pm-hint">${icon("loader", 12)} ${esc(busy)}</p>` : ""}
-            <p class="pm-hint"><strong>SSH·호스팅 서버</strong>: 브라우저가 서버의 폴더를 열 수 없으므로, 서버에 깐 도우미가 대신 검사하고 백업본도 지웁니다. ${helperCode() ? "" : "먼저 실행 → 자동 적용에서 도우미를 깔고 연결 코드를 넣어 주십시오."}<br><strong>이 컴퓨터에서 돌리는 마리나라</strong>: 마리나라 엔진 폴더나 그 안의 packages/server/data를 고르면 됩니다. 파일은 이 브라우저 안에서만 읽습니다.${typeof window.showDirectoryPicker === "function" ? "" : " 이 브라우저는 폴더 속 파일을 모두 훑으므로 packages/server/data를 고르는 편이 빠릅니다."}</p>
-            ${state.scanError ? `<div class="pm-flow-status is-error">${icon("circleX", 13)}${esc(state.scanError)}</div>` : ""}
+            ${busy ? `<p class="pmgr-hint">${icon("loader", 12)} ${esc(busy)}</p>` : ""}
+            <p class="pmgr-hint"><strong>SSH·호스팅 서버</strong>: 브라우저가 서버의 폴더를 열 수 없으므로, 서버에 깐 도우미가 대신 검사하고 백업본도 지웁니다. ${helperCode() ? "" : "먼저 실행 → 자동 적용에서 도우미를 깔고 연결 코드를 넣어 주십시오."}<br><strong>이 컴퓨터에서 돌리는 마리나라</strong>: 마리나라 엔진 폴더나 그 안의 packages/server/data를 고르면 됩니다. 파일은 이 브라우저 안에서만 읽습니다.${typeof window.showDirectoryPicker === "function" ? "" : " 이 브라우저는 폴더 속 파일을 모두 훑으므로 packages/server/data를 고르는 편이 빠릅니다."}</p>
+            ${state.scanError ? `<div class="pmgr-flow-status is-error">${icon("circleX", 13)}${esc(state.scanError)}</div>` : ""}
             ${body}
         </div></div>`;
 }
@@ -2550,25 +2560,25 @@ async function deleteBackups(paths, key) {
 
 function settingsViewHtml() {
   const prefs = state.prefs;
-  return `<div class="pm-toolbar">
-            <button type="button" class="pm-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
-            <strong class="pm-toolbar-title">${icon("settings", 14)}설정</strong>
+  return `<div class="pmgr-toolbar">
+            <button type="button" class="pmgr-btn is-ghost" data-act="view-close">${icon("arrowLeft", 13)}목록으로</button>
+            <strong class="pmgr-toolbar-title">${icon("settings", 14)}설정</strong>
         </div>
-        <div class="pm-scroll"><div class="pm-flow-wrap pm-settings">
-            <div class="pm-side-title">실행 파일</div>
-            <div class="pm-opt is-static"><span><strong>마리나라 data 폴더</strong><span>실행 파일에 넣어 둘 경로입니다. 비우면 실행한 폴더 기준으로 packages/server/data, data 순서로 찾습니다.</span></span>
-                <label class="pm-flow-input">${icon("folder", 14)}<input data-pref-text="dataDir" value="${esc(prefs.dataDir)}" placeholder="예: C:\\Marinara-Engine\\packages\\server\\data" spellcheck="false" autocomplete="off"></label>
+        <div class="pmgr-scroll"><div class="pmgr-flow-wrap pmgr-settings">
+            <div class="pmgr-side-title">실행 파일</div>
+            <div class="pmgr-opt is-static"><span><strong>마리나라 data 폴더</strong><span>실행 파일에 넣어 둘 경로입니다. 비우면 실행한 폴더 기준으로 packages/server/data, data 순서로 찾습니다.</span></span>
+                <label class="pmgr-flow-input">${icon("folder", 14)}<input data-pref-text="dataDir" value="${esc(prefs.dataDir)}" placeholder="예: C:\\Marinara-Engine\\packages\\server\\data" spellcheck="false" autocomplete="off"></label>
             </div>
-            <label class="pm-opt">
+            <label class="pmgr-opt">
                 <input type="checkbox" data-pref="portCheck"${prefs.portCheck ? " checked" : ""}>
                 <span><strong>마리나라가 꺼질 때까지 기다렸다가 패치</strong><span>실행 파일을 돌렸을 때 마리나라가 아직 켜져 있으면, 바로 패치하지 않고 마리나라를 끌 때까지 기다렸다가 패치합니다. 켜짐 여부는 data 폴더의 실행 표시(.writer-lease)와, 이 컴퓨터(localhost)에서 쓸 때는 포트로 확인합니다. 서버 재시작처럼 잠깐 꺼졌다 바로 켜지는 경우에는 패치하지 않고 계속 기다립니다. 이 옵션을 끄면 확인 없이 바로 패치하므로, 마리나라를 먼저 끈 뒤 실행해야 합니다.</span></span>
             </label>
-            <div class="pm-side-title">관리자 백업</div>
-            <div class="pm-opt is-static">
+            <div class="pmgr-side-title">관리자 백업</div>
+            <div class="pmgr-opt is-static">
                 <span><strong>백업 파일</strong><span>패치 코드·출처·적용 기록·그룹·태그·메모·설정을 파일 하나로 저장하거나 불러옵니다.</span></span>
-                <div class="pm-backup-actions">
-                    <button type="button" class="pm-btn" data-act="backup-export">${icon("download", 13)}백업 받기</button>
-                    <button type="button" class="pm-btn" data-act="backup-import">${icon("upload", 13)}백업 불러오기</button>
+                <div class="pmgr-backup-actions">
+                    <button type="button" class="pmgr-btn" data-act="backup-export">${icon("download", 13)}백업 받기</button>
+                    <button type="button" class="pmgr-btn" data-act="backup-import">${icon("upload", 13)}백업 불러오기</button>
                 </div>
                 ${backupPreviewHtml()}
             </div>
@@ -2578,13 +2588,13 @@ function settingsViewHtml() {
 function backupPreviewHtml() {
   const p = state.backupPreview;
   if (!p) return "";
-  return `<div class="pm-backup-preview">
+  return `<div class="pmgr-backup-preview">
             <strong>${esc(p.fileName)}</strong>
             <span>${p.savedAt ? `${fmtDate(p.savedAt)} 저장 · ` : ""}패치 ${p.data.patches.length}개 · 그룹 ${p.data.groups.length}개</span>
             <span>지금 관리자의 패치와 설정을 이 백업으로 바꿉니다.</span>
-            <div class="pm-backup-actions">
-                <button type="button" class="pm-btn is-primary" data-act="backup-apply">${icon("check", 13)}적용</button>
-                <button type="button" class="pm-btn" data-act="backup-cancel">취소</button>
+            <div class="pmgr-backup-actions">
+                <button type="button" class="pmgr-btn is-primary" data-act="backup-apply">${icon("check", 13)}적용</button>
+                <button type="button" class="pmgr-btn" data-act="backup-cancel">취소</button>
             </div>
         </div>`;
 }
@@ -2659,10 +2669,10 @@ function renderMain() {
     refs.main.dataset.view = view;
     return;
   }
-  const keepScroll = refs.main.dataset.view === "list" ? refs.main.querySelector(".pm-scroll")?.scrollTop || 0 : 0;
+  const keepScroll = refs.main.dataset.view === "list" ? refs.main.querySelector(".pmgr-scroll")?.scrollTop || 0 : 0;
   renderList();
   refs.main.dataset.view = "list";
-  if (keepScroll) refs.main.querySelector(".pm-scroll").scrollTop = keepScroll;
+  if (keepScroll) refs.main.querySelector(".pmgr-scroll").scrollTop = keepScroll;
 }
 
 // ----- 상세 -----
@@ -2672,36 +2682,36 @@ function sourceSectionHtml(p) {
   const src = p.source;
   const checking = state.checking.has(p.id);
   const id = esc(p.id);
-  let label = `<span class="pm-field-label">${icon("github", 12)}GitHub</span>`;
+  let label = `<span class="pmgr-field-label">${icon("github", 12)}GitHub</span>`;
   let inner;
   if (flow) {
     inner = renderFlow(flow);
   } else if (src.kind !== "github") {
-    inner = `<div class="pm-hint">${icon("fileCode", 12)} 파일에서 추가함 · ${esc(src.fileName || p.file)}</div>
-            <div class="pm-gh-actions">
-                <button type="button" class="pm-btn" data-act="gh-connect" data-id="${id}">${icon("link", 13)}GitHub 파일 연결</button>
-                <button type="button" class="pm-btn is-ghost" data-act="replace-file" data-id="${id}">${icon("upload", 13)}다른 파일로 교체</button>
+    inner = `<div class="pmgr-hint">${icon("fileCode", 12)} 파일에서 추가함 · ${esc(src.fileName || p.file)}</div>
+            <div class="pmgr-gh-actions">
+                <button type="button" class="pmgr-btn" data-act="gh-connect" data-id="${id}">${icon("link", 13)}GitHub 파일 연결</button>
+                <button type="button" class="pmgr-btn is-ghost" data-act="replace-file" data-id="${id}">${icon("upload", 13)}다른 파일로 교체</button>
             </div>
-            <p class="pm-hint">연결하면 이 패치의 업데이트를 확인하고 받을 수 있습니다.</p>`;
+            <p class="pmgr-hint">연결하면 이 패치의 업데이트를 확인하고 받을 수 있습니다.</p>`;
   } else {
-    label = `<a class="pm-field-label pm-gh-repo" href="https://github.com/${esc(src.repo)}/blob/${esc(src.ref)}/${esc(encodePath(src.path))}" target="_blank" rel="noopener noreferrer" title="GitHub에서 열기">${icon("github", 12)}<span>${esc(src.repo)}</span></a>`;
+    label = `<a class="pmgr-field-label pmgr-gh-repo" href="https://github.com/${esc(src.repo)}/blob/${esc(src.ref)}/${esc(encodePath(src.path))}" target="_blank" rel="noopener noreferrer" title="GitHub에서 열기">${icon("github", 12)}<span>${esc(src.repo)}</span></a>`;
     inner = `
-            <div class="pm-hint pm-mono">${esc(src.path)}${src.branch ? ` · ${esc(src.branch)}` : ""}</div>
-            ${src.message ? `<div class="pm-gh-msg${state.updates.has(p.id) ? " is-update" : ""}">${esc(src.message)}</div>` : ""}
-            <div class="pm-gh-actions">
-                ${state.updates.has(p.id) ? `<button type="button" class="pm-btn is-primary" data-act="gh-view-update" data-id="${id}">${icon("arrowUp", 13)}업데이트 보기</button>` : ""}
-                <button type="button" class="pm-btn" data-act="gh-check" data-id="${id}"${checking ? " disabled" : ""}>${icon(checking ? "loader" : "refresh", 13)}${checking ? "확인 중…" : "업데이트 확인"}</button>
-                <button type="button" class="pm-btn is-ghost" data-act="gh-connect" data-id="${id}">주소 변경</button>
-                <button type="button" class="pm-btn is-ghost" data-act="gh-unlink" data-id="${id}">${icon("unlink", 13)}연결 해제</button>
+            <div class="pmgr-hint pmgr-mono">${esc(src.path)}${src.branch ? ` · ${esc(src.branch)}` : ""}</div>
+            ${src.message ? `<div class="pmgr-gh-msg${state.updates.has(p.id) ? " is-update" : ""}">${esc(src.message)}</div>` : ""}
+            <div class="pmgr-gh-actions">
+                ${state.updates.has(p.id) ? `<button type="button" class="pmgr-btn is-primary" data-act="gh-view-update" data-id="${id}">${icon("arrowUp", 13)}업데이트 보기</button>` : ""}
+                <button type="button" class="pmgr-btn" data-act="gh-check" data-id="${id}"${checking ? " disabled" : ""}>${icon(checking ? "loader" : "refresh", 13)}${checking ? "확인 중…" : "업데이트 확인"}</button>
+                <button type="button" class="pmgr-btn is-ghost" data-act="gh-connect" data-id="${id}">주소 변경</button>
+                <button type="button" class="pmgr-btn is-ghost" data-act="gh-unlink" data-id="${id}">${icon("unlink", 13)}연결 해제</button>
             </div>`;
   }
-  return `<div class="pm-field pm-gh">${label}${inner}</div>`;
+  return `<div class="pmgr-field pmgr-gh">${label}${inner}</div>`;
 }
 
 function renderDetail() {
   const p = patchOf(state.selectedId);
   refs.detail.classList.toggle("is-open", !!p);
-  root.querySelector(".pm-body").classList.toggle("has-detail", !!p);
+  root.querySelector(".pmgr-body").classList.toggle("has-detail", !!p);
   if (!p) {
     setHtml(refs.detail, "");
     return;
@@ -2712,90 +2722,90 @@ function renderDetail() {
   const { key, reason } = statusInfo(p);
   const t = targetOf(p);
   const id = esc(p.id);
-  const keepScroll = refs.detail.dataset.id === p.id ? refs.detail.querySelector(".pm-detail-scroll")?.scrollTop || 0 : 0;
+  const keepScroll = refs.detail.dataset.id === p.id ? refs.detail.querySelector(".pmgr-detail-scroll")?.scrollTop || 0 : 0;
   refs.detail.dataset.id = p.id;
   const confirming = state.confirmDelete === p.id;
   const codeOpen = state.codeOpen === p.id;
   setHtml(
     refs.detail,
     `
-        <div class="pm-detail-head">
-            <div class="pm-detail-title">
+        <div class="pmgr-detail-head">
+            <div class="pmgr-detail-title">
                 <strong>${esc(p.name)}</strong>
-                <span class="pm-ver">${esc(p.file)}</span>
+                <span class="pmgr-ver">${esc(p.file)}</span>
             </div>
-            <button type="button" class="pm-icon-btn" data-act="detail-close" aria-label="상세 닫기">${icon("x", 15)}</button>
+            <button type="button" class="pmgr-icon-btn" data-act="detail-close" aria-label="상세 닫기">${icon("x", 15)}</button>
         </div>
-        <div class="pm-detail-scroll">
-            <div class="pm-detail-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 14)}<div><strong>${STATUS[key].label}</strong><span>${esc(reason)}</span>
-                ${t?.error ? `<span class="pm-err">${esc(t.error)}</span>` : ""}</div></div>
-            <div class="pm-detail-actions">
-                <button type="button" class="pm-btn ${key === "applied" ? "" : "is-primary"}" data-act="run-one" data-id="${id}">${icon("download", 13)}실행 파일</button>
-                ${p.restore ? `<button type="button" class="pm-btn" data-act="restore-one" data-id="${id}">${icon("undo", 13)}되돌리기 파일</button>` : ""}
-                <button type="button" class="pm-btn" data-act="include" data-id="${id}">${icon(p.include ? "powerOff" : "power", 13)}${p.include ? "목록에서 빼기" : "목록에 넣기"}</button>
-                <button type="button" class="pm-btn is-danger" data-act="delete" data-id="${id}">${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>
+        <div class="pmgr-detail-scroll">
+            <div class="pmgr-detail-status is-${STATUS[key].css}">${icon(STATUS[key].icon, 14)}<div><strong>${STATUS[key].label}</strong><span>${esc(reason)}</span>
+                ${t?.error ? `<span class="pmgr-err">${esc(t.error)}</span>` : ""}</div></div>
+            <div class="pmgr-detail-actions">
+                <button type="button" class="pmgr-btn ${key === "applied" ? "" : "is-primary"}" data-act="run-one" data-id="${id}">${icon("download", 13)}실행 파일</button>
+                ${p.restore ? `<button type="button" class="pmgr-btn" data-act="restore-one" data-id="${id}">${icon("undo", 13)}되돌리기 파일</button>` : ""}
+                <button type="button" class="pmgr-btn" data-act="include" data-id="${id}">${icon(p.include ? "powerOff" : "power", 13)}${p.include ? "목록에서 빼기" : "목록에 넣기"}</button>
+                <button type="button" class="pmgr-btn is-danger" data-act="delete" data-id="${id}">${icon("trash", 13)}${confirming ? "정말 삭제" : "삭제"}</button>
             </div>
-            <p class="pm-detail-desc">${esc(p.description || "설명 없음")}</p>
-            <div class="pm-field">
-                <span class="pm-field-label">${icon("package", 12)}대상 패키지</span>
-                <label class="pm-flow-input">${icon("package", 14)}<input data-detail-target="${id}" list="pm-targets-detail" value="${esc(p.target)}" placeholder="예: gacha-forge" spellcheck="false" autocomplete="off"></label>
-                <datalist id="pm-targets-detail">${targetOptions()}</datalist>
-                <p class="pm-hint">${t ? `${esc(t.name)} ${esc(t.version)} · ${esc(t.status)}` : p.target ? (state.targets ? "설치되어 있지 않습니다." : "설치 패키지 목록을 읽지 못했습니다.") : "지정하면 적용 여부와 업데이트 후 재실행 필요를 자동으로 확인합니다."}</p>
+            <p class="pmgr-detail-desc">${esc(p.description || "설명 없음")}</p>
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("package", 12)}대상 패키지</span>
+                <label class="pmgr-flow-input">${icon("package", 14)}<input data-detail-target="${id}" list="pmgr-targets-detail" value="${esc(p.target)}" placeholder="예: gacha-forge" spellcheck="false" autocomplete="off"></label>
+                <datalist id="pmgr-targets-detail">${targetOptions()}</datalist>
+                <p class="pmgr-hint">${t ? `${esc(t.name)} ${esc(t.version)} · ${esc(t.status)}` : p.target ? (state.targets ? "설치되어 있지 않습니다." : "설치 패키지 목록을 읽지 못했습니다.") : "지정하면 적용 여부와 업데이트 후 재실행 필요를 자동으로 확인합니다."}</p>
             </div>
-            <div class="pm-field">
-                <span class="pm-field-label">${icon("circleCheck", 12)}적용 기록</span>
-                <p class="pm-hint">${p.applied ? `${fmtTime(p.applied.at)} · 코드 ${esc(shortHash(p.applied.hash))}${p.applied.version ? ` · 대상 ${esc(p.applied.version)}` : ""}` : "기록 없음"}</p>
-                <div class="pm-gh-actions">
-                    <button type="button" class="pm-btn" data-act="mark-applied" data-id="${id}">${icon("check", 13)}적용됨으로 표시</button>
-                    ${p.applied ? `<button type="button" class="pm-btn is-ghost" data-act="mark-off" data-id="${id}">기록 지우기</button>` : ""}
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("circleCheck", 12)}적용 기록</span>
+                <p class="pmgr-hint">${p.applied ? `${fmtTime(p.applied.at)} · 코드 ${esc(shortHash(p.applied.hash))}${p.applied.version ? ` · 대상 ${esc(p.applied.version)}` : ""}` : "기록 없음"}</p>
+                <div class="pmgr-gh-actions">
+                    <button type="button" class="pmgr-btn" data-act="mark-applied" data-id="${id}">${icon("check", 13)}적용됨으로 표시</button>
+                    ${p.applied ? `<button type="button" class="pmgr-btn is-ghost" data-act="mark-off" data-id="${id}">기록 지우기</button>` : ""}
                 </div>
             </div>
             ${sourceSectionHtml(p)}
-            <div class="pm-field">
-                <span class="pm-field-label">${icon("folder", 12)}그룹</span>
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("folder", 12)}그룹</span>
                 ${
                   state.editingGroup === `detail:${p.id}`
-                    ? `<div class="pm-tag-edit"><input data-group-input="new" data-assign="${id}" placeholder="새 그룹 이름 입력 후 Enter" maxlength="40"></div>`
-                    : `<label class="pm-select is-block"><select data-detail-group="${id}">
+                    ? `<div class="pmgr-tag-edit"><input data-group-input="new" data-assign="${id}" placeholder="새 그룹 이름 입력 후 Enter" maxlength="40"></div>`
+                    : `<label class="pmgr-select is-block"><select data-detail-group="${id}">
                     <option value="">미분류</option>
                     ${state.groups.map((g) => `<option value="${esc(g.id)}"${p.group === g.id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}
                     <option value="__new">+ 새 그룹 만들기…</option>
                 </select></label>`
                 }
             </div>
-            <div class="pm-field">
-                <span class="pm-field-label">${icon("tag", 12)}태그</span>
-                <div class="pm-tag-edit">
-                    ${p.tags.map((tg) => `<span class="pm-chip is-removable">#${esc(tg)}<button type="button" data-act="tag-remove" data-id="${id}" data-v="${esc(tg)}" aria-label="태그 ${esc(tg)} 제거">${icon("x", 10)}</button></span>`).join("")}
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("tag", 12)}태그</span>
+                <div class="pmgr-tag-edit">
+                    ${p.tags.map((tg) => `<span class="pmgr-chip is-removable">#${esc(tg)}<button type="button" data-act="tag-remove" data-id="${id}" data-v="${esc(tg)}" aria-label="태그 ${esc(tg)} 제거">${icon("x", 10)}</button></span>`).join("")}
                     <input data-detail-tag="${id}" placeholder="태그 입력 (Enter, 쉼표, #)" enterkeyhint="done">
                 </div>
-                <div class="pm-tag-cloud pm-tag-suggest" data-tag-suggest></div>
+                <div class="pmgr-tag-cloud pmgr-tag-suggest" data-tag-suggest></div>
             </div>
-            <div class="pm-field">
-                <span class="pm-field-label">${icon("note", 12)}메모</span>
+            <div class="pmgr-field">
+                <span class="pmgr-field-label">${icon("note", 12)}메모</span>
                 <textarea data-detail-note="${id}" rows="3" placeholder="이 패치에 대한 메모 (검색에 포함됩니다)">${esc(p.note)}</textarea>
             </div>
-            <dl class="pm-info">
-                <dt>순서</dt><dd>${state.patches.indexOf(p) + 1}번째 <button type="button" class="pm-act" data-act="move-up" data-id="${id}" aria-label="앞으로">${icon("chevronUp", 12)}</button><button type="button" class="pm-act" data-act="move-down" data-id="${id}" aria-label="뒤로">${icon("chevronDown", 12)}</button></dd>
+            <dl class="pmgr-info">
+                <dt>순서</dt><dd>${state.patches.indexOf(p) + 1}번째 <button type="button" class="pmgr-act" data-act="move-up" data-id="${id}" aria-label="앞으로">${icon("chevronUp", 12)}</button><button type="button" class="pmgr-act" data-act="move-down" data-id="${id}" aria-label="뒤로">${icon("chevronDown", 12)}</button></dd>
                 <dt>되돌리기</dt><dd>${p.restore ? "--restore 지원" : "지원 안 함"}</dd>
                 <dt>크기</dt><dd>${kb(p.size)}</dd>
                 <dt>추가일</dt><dd>${fmtDate(p.addedAt)}</dd>
                 <dt>수정일</dt><dd>${fmtDate(p.updatedAt)}</dd>
-                <dt>해시</dt><dd class="pm-mono" title="${esc(p.hash)}">${esc(shortHash(p.hash))}</dd>
+                <dt>해시</dt><dd class="pmgr-mono" title="${esc(p.hash)}">${esc(shortHash(p.hash))}</dd>
             </dl>
-            <details class="pm-code" data-code="${id}"${codeOpen ? " open" : ""}><summary>코드 보기</summary>${codeOpen ? `<pre>${esc(state.scripts[p.id])}</pre>` : ""}</details>
+            <details class="pmgr-code" data-code="${id}"${codeOpen ? " open" : ""}><summary>코드 보기</summary>${codeOpen ? `<pre>${esc(state.scripts[p.id])}</pre>` : ""}</details>
         </div>`,
   );
-  if (keepScroll) refs.detail.querySelector(".pm-detail-scroll").scrollTop = keepScroll;
+  if (keepScroll) refs.detail.querySelector(".pmgr-detail-scroll").scrollTop = keepScroll;
 }
 
 function renderHeader() {
   const applied = state.patches.filter((p) => statusOf(p) === "applied").length;
   const stale = state.patches.filter((p) => statusOf(p) === "stale").length;
   refs.sub.textContent = state.patches.length ? `패치 ${state.patches.length}개 · 적용 ${applied}개${stale ? ` · 다시 실행 필요 ${stale}개` : ""}` : "";
-  root.querySelector(".pm-menu-btn").classList.toggle("has-filter", !!filterActive());
+  root.querySelector(".pmgr-menu-btn").classList.toggle("has-filter", !!filterActive());
   const busy = state.loading || !!state.checkingAll;
-  for (const button of root.querySelectorAll(".pm-refresh-btn")) {
+  for (const button of root.querySelectorAll(".pmgr-refresh-btn")) {
     if (button.disabled === busy) continue;
     button.disabled = busy;
     button.innerHTML = icon(busy ? "loader" : "refresh", 15);
@@ -3032,7 +3042,7 @@ function renderTagSuggest(input) {
   hits.sort((a, b) => b[0].toLowerCase().startsWith(q) - a[0].toLowerCase().startsWith(q));
   box.innerHTML = hits
     .slice(0, 8)
-    .map(([t, n]) => `<button type="button" class="pm-tag" data-act="tag-suggest"${bulk ? ' data-bulk="1"' : ""} data-v="${esc(t)}">#${esc(t)}<span>${n}</span></button>`)
+    .map(([t, n]) => `<button type="button" class="pmgr-tag" data-act="tag-suggest"${bulk ? ' data-bulk="1"' : ""} data-v="${esc(t)}">#${esc(t)}<span>${n}</span></button>`)
     .join("");
 }
 
@@ -3652,10 +3662,10 @@ function close() {
 // installed too, it joins that manager's button row instead of starting a second one.
 function ensureEntry() {
   const section = document.getElementById(SECTION_ID);
-  if (!section || section.querySelector(".pm-entry")) return;
+  if (!section || section.querySelector(".pmgr-entry")) return;
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "pm-entry";
+  button.className = "pmgr-entry";
   button.title = "서버 패치 관리자 열기";
   button.innerHTML = `${icon("wrench", 13)}<span>패치</span>`;
   button.addEventListener("click", () => open());
@@ -3664,10 +3674,10 @@ function ensureEntry() {
     shared.append(button);
     return;
   }
-  let row = section.querySelector(":scope > .pm-entry-row");
+  let row = section.querySelector(":scope > .pmgr-entry-row");
   if (!row) {
     row = document.createElement("div");
-    row.className = "pm-entry-row";
+    row.className = "pmgr-entry-row";
     section.prepend(row);
   }
   row.append(button);
@@ -3681,14 +3691,14 @@ function queueEntry() {
     if (stopped) return;
     const section = document.getElementById(SECTION_ID);
     // Move from our own row into the GitHub manager's row once that appears.
-    const own = section?.querySelector(":scope > .pm-entry-row");
+    const own = section?.querySelector(":scope > .pmgr-entry-row");
     if (own && section.querySelector(":scope > .xm-entry-row")) own.remove();
     ensureEntry();
   });
 }
 function watchEntry() {
   entryWatch.observer = new MutationObserver((records) => {
-    if (records.some((r) => !r.target.closest?.(".pm-overlay") && [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1))) queueEntry();
+    if (records.some((r) => !r.target.closest?.(".pmgr-overlay") && [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1))) queueEntry();
   });
   entryWatch.observer.observe(document.body, { childList: true, subtree: true });
   queueEntry();
@@ -3716,6 +3726,6 @@ marinara.onCleanup(() => {
   cancelAnimationFrame(openFrame);
   marinara.clearTimeout(confirmTimer);
   root?.remove();
-  for (const el of document.querySelectorAll(".pm-entry, .pm-entry-row")) el.remove();
+  for (const el of document.querySelectorAll(".pmgr-entry, .pmgr-entry-row")) el.remove();
   return flushSave();
 });

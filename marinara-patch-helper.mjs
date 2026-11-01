@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 마리나라 패치 도우미 · 패치 관리자 1.3.0
+// 마리나라 패치 도우미 · 패치 관리자 1.3.1
 //
 // 마리나라를 이 도우미로 켜 두면, 패치 관리자의 [자동 적용]을 눌렀을 때 도우미가 마리나라를 잠깐 끄고,
 // 꺼진 동안 패치를 넣은 뒤 다시 켭니다. 터미널을 다시 열 필요가 없습니다(SSH로 쓰는 서버, 호스팅 서버도 같음).
@@ -20,7 +20,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect } from "node:net";
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const MANAGER_NAME = "패치 관리자";
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -51,8 +51,18 @@ function readEnv(file) {
   } catch {}
   return out;
 }
-const env = { ...readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")), ...process.env };
-const port = Number(opt("--port") || env.PORT || 7860);
+// The server gets the environment start.bat / start.sh give it: .env loaded before Node starts (so settings
+// such as NODE_OPTIONS --require add-ons take effect), then the launchers' own defaults. Only the server gets
+// it; patch scripts run with this helper's plain environment, without those add-ons preloaded.
+const fileEnv = {};
+for (const [key, value] of Object.entries(readEnv(process.env.MARINARA_ENV_FILE || join(engine, ".env")))) if (value !== "") fileEnv[key] = value;
+const env = { ...process.env, ...fileEnv };
+if (opt("--port")) env.PORT = opt("--port");
+env.NODE_ENV = "production";
+env.PORT = env.PORT || "7860";
+env.HOST = env.HOST || "0.0.0.0";
+env.SIDECAR_RUNTIME_INSTALL_ENABLED = env.SIDECAR_RUNTIME_INSTALL_ENABLED || "true";
+const port = Number(env.PORT) || 7860;
 const dataDir = opt("--data") ? resolve(opt("--data")) : env.DATA_DIR ? resolve(serverRoot, env.DATA_DIR) : join(serverRoot, "data");
 const base = "http://127.0.0.1:" + port + "/api";
 
@@ -378,10 +388,10 @@ for (;;) {
   }
   // Marinara allows its graceful restart only when this env names its parent: that is what makes
   // this helper the supervisor that gets the restart's gap.
-  child = spawn(process.execPath, [join(serverRoot, "dist", "index.js")], {
-    cwd: engine,
+  child = spawn(process.execPath, ["dist/index.js"], {
+    cwd: serverRoot,
     stdio: "inherit",
-    env: { ...process.env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
+    env: { ...env, MARINARA_RESTART_SUPERVISOR: String(process.pid) },
   });
   const code = await exited(child);
   child = null;
